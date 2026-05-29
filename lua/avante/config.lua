@@ -543,6 +543,10 @@ M._defaults = {
   ---8. minimize_diff                   : Whether to remove unchanged lines when applying a code block
   ---9. enable_token_counting           : Whether to enable token counting. Default to true.
   ---10. auto_add_current_file          : Whether to automatically add the current file when opening a new chat. Default to true.
+  ---11. edit_apply_at_end               : For the in-buffer edit path (AvanteEdit), defer all buffer updates until the
+  ---                                     full response has arrived instead of rewriting the selected range on every
+  ---                                     streamed chunk. Avoids redraw thrash with very fast providers (Cerebras, Groq).
+  ---                                     Default to false. Can be overridden per-provider via providers.<name>.edit_apply_at_end.
   behaviour = {
     auto_focus_sidebar = true,
     auto_suggestions = false, -- Experimental stage
@@ -563,6 +567,7 @@ M._defaults = {
     enable_fastapply = false,
     include_generated_by_commit_line = false, -- Controls if 'Generated-by: <provider/model>' line is added to git commit message
     auto_add_current_file = true, -- Whether to automatically add the current file when opening a new chat
+    edit_apply_at_end = false, -- Defer AvanteEdit buffer writes until full response arrives (per-provider override available)
     --- popup is the original yes,all,no in a floating window
     --- inline_buttons is the new inline buttons in the sidebar
     ---@type "popup" | "inline_buttons"

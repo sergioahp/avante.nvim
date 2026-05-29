@@ -139,12 +139,17 @@ function Selection:submit_input(input)
 
   if self.prompt_input then self.prompt_input:start_spinner() end
 
-  ---@type AvanteLLMStartCallback
-  local function on_start(_) end
+  -- Resolve apply-at-end: per-provider override wins over global behaviour default.
+  -- Read at request time so AvanteSwitchProvider during the session is respected.
+  local provider_conf = Config.providers[Config.provider]
+  local apply_at_end
+  if provider_conf and provider_conf.edit_apply_at_end ~= nil then
+    apply_at_end = provider_conf.edit_apply_at_end
+  else
+    apply_at_end = Config.behaviour.edit_apply_at_end == true
+  end
 
-  ---@type AvanteLLMChunkCallback
-  local function on_chunk(chunk)
-    full_response = full_response .. chunk
+  local function apply_to_buffer()
     local response_lines_ = vim.split(full_response, "\n")
     local response_lines = {}
     local in_code_block = false
@@ -175,6 +180,15 @@ function Selection:submit_input(input)
     finish_line = start_line + #response_lines - 1
   end
 
+  ---@type AvanteLLMStartCallback
+  local function on_start(_) end
+
+  ---@type AvanteLLMChunkCallback
+  local function on_chunk(chunk)
+    full_response = full_response .. chunk
+    if not apply_at_end then apply_to_buffer() end
+  end
+
   ---@type AvanteLLMStopCallback
   local function on_stop(stop_opts)
     if stop_opts.error then
@@ -188,6 +202,7 @@ function Selection:submit_input(input)
       )
       return
     end
+    if apply_at_end then apply_to_buffer() end
     if self.prompt_input then self.prompt_input:stop_spinner() end
     vim.defer_fn(function() self:close_editing_input() end, 0)
     Utils.debug("full response:", full_response)
