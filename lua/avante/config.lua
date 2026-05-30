@@ -779,10 +779,16 @@ M._defaults = {
   --- providers may override this by setting the same field on their own config
   --- (e.g. providers.claude.edit_stream_flush_interval_ms = 16 for a fast model,
   --- or = 0 to opt that provider out of coalescing entirely).
+  --- @field edit_stream_disabled boolean If true, no incremental buffer writes
+  --- happen during streaming -- everything is collected in memory and written
+  --- once at completion. Useful for benchmarking end-to-end latency, or for
+  --- providers/models where streaming gains nothing. Per-provider override
+  --- supported via providers.<name>.edit_stream_disabled. Defaults to false.
   selection = {
     enabled = true,
     hint_display = "delayed",
     edit_stream_flush_interval_ms = 33,
+    edit_stream_disabled = false,
   },
   --- @class AvanteRepoMapConfig
   repo_map = {

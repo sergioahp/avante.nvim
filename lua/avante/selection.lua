@@ -197,11 +197,24 @@ function Selection:submit_input(input)
     or 0
   local schedule_flush = interval_ms > 0 and Utils.throttle(do_flush, interval_ms) or do_flush
 
+  -- Same precedence as the interval, but a boolean needs explicit nil checks
+  -- because `false or X` returns X.
+  local stream_disabled
+  if provider_cfg ~= nil and provider_cfg.edit_stream_disabled ~= nil then
+    stream_disabled = provider_cfg.edit_stream_disabled
+  elseif Config.selection.edit_stream_disabled ~= nil then
+    stream_disabled = Config.selection.edit_stream_disabled
+  else
+    stream_disabled = false
+  end
+
   ---@type AvanteLLMChunkCallback
   local function on_chunk(chunk)
     if flusher.done then return end
     local was_empty = flusher.full_response == ""
     flusher.full_response = flusher.full_response .. chunk
+    -- Benchmark / no-stream mode: just collect; on_stop will do the single write.
+    if stream_disabled then return end
     -- Leading edge: show the first chunk immediately so the user doesn't see
     -- `interval_ms` of blank latency after pressing submit.
     if was_empty then
