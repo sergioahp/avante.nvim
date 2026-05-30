@@ -187,7 +187,14 @@ function Selection:submit_input(input)
   -- No args: Utils.throttle captures args at schedule time, but do_flush reads
   -- from `flusher` at fire time, so chunks that arrive during the window are
   -- still picked up. 0 disables coalescing.
-  local interval_ms = Config.selection.edit_stream_flush_interval_ms or 0
+  --
+  -- Resolution order: per-provider override -> global default -> 0.
+  -- An explicit 0 anywhere disables coalescing for that scope. Lua's `or`
+  -- chains correctly here because 0 is truthy; only nil falls through.
+  local provider_cfg = Provider.get_config()
+  local interval_ms = (provider_cfg and provider_cfg.edit_stream_flush_interval_ms)
+    or Config.selection.edit_stream_flush_interval_ms
+    or 0
   local schedule_flush = interval_ms > 0 and Utils.throttle(do_flush, interval_ms) or do_flush
 
   ---@type AvanteLLMChunkCallback
