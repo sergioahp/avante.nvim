@@ -129,23 +129,27 @@ function Selection:submit_input(input)
   local code_lines = api.nvim_buf_get_lines(self.code_bufnr, 0, -1, false)
   local code_content = table.concat(code_lines, "\n")
 
-  local full_response = ""
-  local start_line = self.selection.range.start.lnum
-  local finish_line = self.selection.range.finish.lnum
-
-  local original_first_line_indentation = Utils.get_indentation(code_lines[self.selection.range.start.lnum])
-
-  local need_prepend_indentation = false
+  -- Shared mutable state for the streaming edit. on_chunk only mutates fields
+  -- here; do_flush reads them at fire time. See spec: closures over a single
+  -- table, serialized through Neovim's main loop, so no race-safety needed.
+  local flusher = {
+    full_response = "",
+    done = false,
+    start_line = self.selection.range.start.lnum,
+    finish_line = self.selection.range.finish.lnum,
+    need_prepend_indentation = false,
+    original_first_line_indentation = Utils.get_indentation(code_lines[self.selection.range.start.lnum]),
+  }
 
   if self.prompt_input then self.prompt_input:start_spinner() end
 
   ---@type AvanteLLMStartCallback
   local function on_start(_) end
 
-  ---@type AvanteLLMChunkCallback
-  local function on_chunk(chunk)
-    full_response = full_response .. chunk
-    local response_lines_ = vim.split(full_response, "\n")
+  local function do_flush()
+    if flusher.done then return end
+    if not api.nvim_buf_is_valid(self.code_bufnr) then return end
+    local response_lines_ = vim.split(flusher.full_response, "\n")
     local response_lines = {}
     local in_code_block = false
     local line_processed
@@ -165,15 +169,39 @@ function Selection:submit_input(input)
     if #response_lines == 1 then
       local first_line = response_lines[1]
       local first_line_indentation = Utils.get_indentation(first_line)
-      need_prepend_indentation = first_line_indentation ~= original_first_line_indentation
+      flusher.need_prepend_indentation = first_line_indentation ~= flusher.original_first_line_indentation
     end
-    if need_prepend_indentation then
+    if flusher.need_prepend_indentation then
       for i, line in ipairs(response_lines) do
-        response_lines[i] = original_first_line_indentation .. line
+        response_lines[i] = flusher.original_first_line_indentation .. line
       end
     end
-    pcall(function() api.nvim_buf_set_lines(self.code_bufnr, start_line - 1, finish_line, true, response_lines) end)
-    finish_line = start_line + #response_lines - 1
+    pcall(
+      function()
+        api.nvim_buf_set_lines(self.code_bufnr, flusher.start_line - 1, flusher.finish_line, true, response_lines)
+      end
+    )
+    flusher.finish_line = flusher.start_line + #response_lines - 1
+  end
+
+  -- No args: Utils.throttle captures args at schedule time, but do_flush reads
+  -- from `flusher` at fire time, so chunks that arrive during the window are
+  -- still picked up. 0 disables coalescing.
+  local interval_ms = Config.selection.edit_stream_flush_interval_ms or 0
+  local schedule_flush = interval_ms > 0 and Utils.throttle(do_flush, interval_ms) or do_flush
+
+  ---@type AvanteLLMChunkCallback
+  local function on_chunk(chunk)
+    if flusher.done then return end
+    local was_empty = flusher.full_response == ""
+    flusher.full_response = flusher.full_response .. chunk
+    -- Leading edge: show the first chunk immediately so the user doesn't see
+    -- `interval_ms` of blank latency after pressing submit.
+    if was_empty then
+      do_flush()
+    else
+      schedule_flush()
+    end
   end
 
   ---@type AvanteLLMStopCallback
@@ -189,9 +217,13 @@ function Selection:submit_input(input)
       )
       return
     end
+    -- Final synchronous flush so the tail chunks land before we tear down,
+    -- then block any pending throttle timer from firing on stale state.
+    do_flush()
+    flusher.done = true
     if self.prompt_input then self.prompt_input:stop_spinner() end
     vim.defer_fn(function() self:close_editing_input() end, 0)
-    Utils.debug("full response:", full_response)
+    Utils.debug("full response:", flusher.full_response)
   end
 
   local filetype = api.nvim_get_option_value("filetype", { buf = self.code_bufnr })

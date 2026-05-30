@@ -773,9 +773,13 @@ M._defaults = {
   --- @class AvanteSelectionConfig
   --- @field enabled boolean
   --- @field hint_display "delayed" | "immediate" | "none" When to show key map hints.
+  --- @field edit_stream_flush_interval_ms integer Throttle interval for buffer
+  --- updates while a visual-select edit is streaming. 0 disables coalescing
+  --- (one buffer write per chunk; original behavior).
   selection = {
     enabled = true,
     hint_display = "delayed",
+    edit_stream_flush_interval_ms = 33,
   },
   --- @class AvanteRepoMapConfig
   repo_map = {
