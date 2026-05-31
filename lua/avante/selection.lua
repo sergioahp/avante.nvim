@@ -152,9 +152,14 @@ function Selection:submit_input(input)
     local response_lines_ = vim.split(flusher.full_response, "\n")
     local response_lines = {}
     local in_code_block = false
+    local in_think_block = false
     local line_processed
     for _, line in ipairs(response_lines_) do
-      if line:match("^<code>") then
+      if line:match("^<think>") then
+        in_think_block = true
+      elseif in_think_block then
+        if line:match("</think>") then in_think_block = false end
+      elseif line:match("^<code>") then
         in_code_block = true
         line_processed = line:gsub("^<code>", ""):gsub("</code>.*$", "")
         if line_processed ~= "" then table.insert(response_lines, line_processed) end
