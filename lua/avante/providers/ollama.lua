@@ -23,6 +23,16 @@ M.role_map = {
   assistant = "assistant",
 }
 
+---@param opts AvanteHandlerOptions
+---@param chunk string
+local function emit_reasoning_chunk(opts, chunk)
+  if opts.on_reasoning_chunk then
+    opts.on_reasoning_chunk(chunk)
+  elseif opts.on_chunk then
+    opts.on_chunk(chunk)
+  end
+end
+
 -- Ollama is disabled by default. Users should override is_env_set()
 -- implementation in their configs to enable it. There is a helper
 -- check_endpoint_alive() that can be used to test if configured
@@ -192,7 +202,7 @@ function M:parse_stream_data(ctx, data, opts)
     local thinking = jsn.message.thinking or jsn.message.reasoning_content
     if thinking and thinking ~= "" then
       Providers.openai:add_thinking_message(ctx, thinking, "generating", opts)
-      if opts.on_chunk then opts.on_chunk(thinking) end
+      emit_reasoning_chunk(opts, thinking)
     end
     if jsn.message.content then
       local content = jsn.message.content

@@ -74,6 +74,7 @@ vim.g.avante_login = vim.g.avante_login
 ---@class AvanteHandlerOptions: table<[string], string>
 ---@field on_start AvanteLLMStartCallback
 ---@field on_chunk AvanteLLMChunkCallback
+---@field on_reasoning_chunk? AvanteLLMChunkCallback
 ---@field on_stop AvanteLLMStopCallback
 ---@field on_messages_add? fun(messages: avante.HistoryMessage[]): nil
 ---@field on_state_change? fun(state: avante.GenerateState): nil
@@ -438,6 +439,7 @@ vim.g.avante_login = vim.g.avante_login
 ---@field on_save_acp_session_id? fun(session_id: string): nil
 ---@field on_start AvanteLLMStartCallback
 ---@field on_chunk? AvanteLLMChunkCallback
+---@field on_reasoning_chunk? AvanteLLMChunkCallback
 ---@field on_stop AvanteLLMStopCallback
 ---@field on_memory_summarize? AvanteLLMMemorySummarizeCallback
 ---@field on_tool_log? fun(tool_id: string, tool_name: string, log: string, state: AvanteLLMToolUseState): nil

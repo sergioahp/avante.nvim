@@ -1804,6 +1804,7 @@ function M._stream(opts)
     update_tokens_usage = opts.update_tokens_usage,
     on_start = opts.on_start,
     on_chunk = opts.on_chunk,
+    on_reasoning_chunk = opts.on_reasoning_chunk,
     on_stop = function(stop_opts)
       if stop_opts.usage and opts.update_tokens_usage then opts.update_tokens_usage(stop_opts.usage) end
 
@@ -2149,6 +2150,13 @@ function M.stream(opts)
     opts.on_chunk = vim.schedule_wrap(function(chunk)
       if is_completed then return end
       if original_on_chunk then return original_on_chunk(chunk) end
+    end)
+  end
+  if opts.on_reasoning_chunk ~= nil then
+    local original_on_reasoning_chunk = opts.on_reasoning_chunk
+    opts.on_reasoning_chunk = vim.schedule_wrap(function(chunk)
+      if is_completed then return end
+      if original_on_reasoning_chunk then return original_on_reasoning_chunk(chunk) end
     end)
   end
   if opts.on_stop ~= nil then

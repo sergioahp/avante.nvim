@@ -18,6 +18,16 @@ M.role_map = {
   assistant = "assistant",
 }
 
+---@param opts AvanteHandlerOptions
+---@param chunk string
+local function emit_reasoning_chunk(opts, chunk)
+  if opts.on_reasoning_chunk then
+    opts.on_reasoning_chunk(chunk)
+  elseif opts.on_chunk then
+    opts.on_chunk(chunk)
+  end
+end
+
 function M:is_disable_stream() return false end
 
 ---@param tool AvanteLLMTool
@@ -612,11 +622,11 @@ function M:parse_response(ctx, data_stream, _, opts)
       if jsn.delta and jsn.delta ~= vim.NIL and jsn.delta ~= "" then
         if ctx.returned_think_start_tag == nil or not ctx.returned_think_start_tag then
           ctx.returned_think_start_tag = true
-          if opts.on_chunk then opts.on_chunk("<think>\n") end
+          emit_reasoning_chunk(opts, "<think>\n")
         end
         ctx.last_think_content = jsn.delta
         self:add_thinking_message(ctx, jsn.delta, "generating", opts)
-        if opts.on_chunk then opts.on_chunk(jsn.delta) end
+        emit_reasoning_chunk(opts, jsn.delta)
       end
     elseif jsn.type == "response.function_call_arguments.delta" then
       -- Function call arguments delta
@@ -669,16 +679,10 @@ function M:parse_response(ctx, data_stream, _, opts)
         ctx.returned_think_start_tag ~= nil and (ctx.returned_think_end_tag == nil or not ctx.returned_think_end_tag)
       then
         ctx.returned_think_end_tag = true
-        if opts.on_chunk then
-          if
-            ctx.last_think_content
-            and ctx.last_think_content ~= vim.NIL
-            and ctx.last_think_content:sub(-1) ~= "\n"
-          then
-            opts.on_chunk("\n</think>\n")
-          else
-            opts.on_chunk("</think>\n")
-          end
+        if ctx.last_think_content and ctx.last_think_content ~= vim.NIL and ctx.last_think_content:sub(-1) ~= "\n" then
+          emit_reasoning_chunk(opts, "\n</think>\n")
+        else
+          emit_reasoning_chunk(opts, "</think>\n")
         end
         self:add_thinking_message(ctx, "", "generated", opts)
       end
@@ -722,19 +726,19 @@ function M:parse_response(ctx, data_stream, _, opts)
   if delta.reasoning_content and delta.reasoning_content ~= vim.NIL and delta.reasoning_content ~= "" then
     if ctx.returned_think_start_tag == nil or not ctx.returned_think_start_tag then
       ctx.returned_think_start_tag = true
-      if opts.on_chunk then opts.on_chunk("<think>\n") end
+      emit_reasoning_chunk(opts, "<think>\n")
     end
     ctx.last_think_content = delta.reasoning_content
     self:add_thinking_message(ctx, delta.reasoning_content, "generating", opts)
-    if opts.on_chunk then opts.on_chunk(delta.reasoning_content) end
+    emit_reasoning_chunk(opts, delta.reasoning_content)
   elseif delta.reasoning and delta.reasoning ~= vim.NIL then
     if ctx.returned_think_start_tag == nil or not ctx.returned_think_start_tag then
       ctx.returned_think_start_tag = true
-      if opts.on_chunk then opts.on_chunk("<think>\n") end
+      emit_reasoning_chunk(opts, "<think>\n")
     end
     ctx.last_think_content = delta.reasoning
     self:add_thinking_message(ctx, delta.reasoning, "generating", opts)
-    if opts.on_chunk then opts.on_chunk(delta.reasoning) end
+    emit_reasoning_chunk(opts, delta.reasoning)
   elseif delta.tool_calls and delta.tool_calls ~= vim.NIL then
     local choice_index = choice.index or 0
     for idx, tool_call in ipairs(delta.tool_calls) do
@@ -767,12 +771,10 @@ function M:parse_response(ctx, data_stream, _, opts)
       ctx.returned_think_start_tag ~= nil and (ctx.returned_think_end_tag == nil or not ctx.returned_think_end_tag)
     then
       ctx.returned_think_end_tag = true
-      if opts.on_chunk then
-        if ctx.last_think_content and ctx.last_think_content ~= vim.NIL and ctx.last_think_content:sub(-1) ~= "\n" then
-          opts.on_chunk("\n</think>\n")
-        else
-          opts.on_chunk("</think>\n")
-        end
+      if ctx.last_think_content and ctx.last_think_content ~= vim.NIL and ctx.last_think_content:sub(-1) ~= "\n" then
+        emit_reasoning_chunk(opts, "\n</think>\n")
+      else
+        emit_reasoning_chunk(opts, "</think>\n")
       end
       self:add_thinking_message(ctx, "", "generated", opts)
     end

@@ -40,6 +40,16 @@ M.role_map = {
   assistant = "assistant",
 }
 
+---@param opts AvanteHandlerOptions
+---@param chunk string
+local function emit_reasoning_chunk(opts, chunk)
+  if opts.on_reasoning_chunk then
+    opts.on_reasoning_chunk(chunk)
+  elseif opts.on_chunk then
+    opts.on_chunk(chunk)
+  end
+end
+
 M._is_setup = false
 M._refresh_timer = nil
 
@@ -417,7 +427,7 @@ function M:parse_response(ctx, data_stream, event_state, opts)
       content_block.uuid = msg.uuid
       if opts.on_messages_add then opts.on_messages_add({ msg }) end
     elseif content_block.type == "thinking" then
-      if opts.on_chunk then opts.on_chunk("<think>\n") end
+      emit_reasoning_chunk(opts, "<think>\n")
       if opts.on_messages_add then
         local msg = new_assistant_message({
           type = "thinking",
@@ -452,7 +462,7 @@ function M:parse_response(ctx, data_stream, event_state, opts)
       return
     elseif jsn.delta.type == "thinking_delta" then
       content_block.thinking = content_block.thinking .. jsn.delta.thinking
-      if opts.on_chunk then opts.on_chunk(jsn.delta.thinking) end
+      emit_reasoning_chunk(opts, jsn.delta.thinking)
       if opts.on_messages_add then
         local msg = new_assistant_message({
           type = "thinking",
@@ -483,12 +493,10 @@ function M:parse_response(ctx, data_stream, event_state, opts)
         opts.on_messages_add({ msg })
       end
     elseif content_block.type == "thinking" then
-      if opts.on_chunk then
-        if content_block.thinking and content_block.thinking ~= vim.NIL and content_block.thinking:sub(-1) ~= "\n" then
-          opts.on_chunk("\n</think>\n\n")
-        else
-          opts.on_chunk("</think>\n\n")
-        end
+      if content_block.thinking and content_block.thinking ~= vim.NIL and content_block.thinking:sub(-1) ~= "\n" then
+        emit_reasoning_chunk(opts, "\n</think>\n\n")
+      else
+        emit_reasoning_chunk(opts, "</think>\n\n")
       end
       if opts.on_messages_add then
         local msg = new_assistant_message({

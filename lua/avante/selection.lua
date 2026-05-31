@@ -227,6 +227,7 @@ function Selection:submit_input(input)
     mode = "editing",
     on_start = on_start,
     on_chunk = on_chunk,
+    on_reasoning_chunk = function() end,
     on_stop = on_stop,
   })
 end
