@@ -31,6 +31,36 @@ Selection.__index = Selection
 
 Selection.did_setup = false
 
+---@param full_response string
+---@return string[]
+function Selection._parse_editing_response(full_response)
+  local response_lines_ = vim.split(full_response, "\n")
+  local response_lines = {}
+  local in_code_block = false
+  local in_think_block = false
+  local line_processed
+
+  for _, line in ipairs(response_lines_) do
+    if in_think_block then
+      if line:match("</think>") then in_think_block = false end
+    elseif line:match("^<think>") then
+      if not line:match("</think>") then in_think_block = true end
+    elseif line:match("^<code>") then
+      in_code_block = true
+      line_processed = line:gsub("^<code>", ""):gsub("</code>.*$", "")
+      if line_processed ~= "" then table.insert(response_lines, line_processed) end
+    elseif line:match("</code>") then
+      in_code_block = false
+      line_processed = line:gsub("</code>.*$", "")
+      if line_processed ~= "" then table.insert(response_lines, line_processed) end
+    elseif in_code_block then
+      table.insert(response_lines, line)
+    end
+  end
+
+  return response_lines
+end
+
 ---@param id integer the tabpage id retrieved from api.nvim_get_current_tabpage()
 function Selection:new(id)
   return setmetatable({
@@ -145,23 +175,7 @@ function Selection:submit_input(input)
   ---@type AvanteLLMChunkCallback
   local function on_chunk(chunk)
     full_response = full_response .. chunk
-    local response_lines_ = vim.split(full_response, "\n")
-    local response_lines = {}
-    local in_code_block = false
-    local line_processed
-    for _, line in ipairs(response_lines_) do
-      if line:match("^<code>") then
-        in_code_block = true
-        line_processed = line:gsub("^<code>", ""):gsub("</code>.*$", "")
-        if line_processed ~= "" then table.insert(response_lines, line_processed) end
-      elseif line:match("</code>") then
-        in_code_block = false
-        line_processed = line:gsub("</code>.*$", "")
-        if line_processed ~= "" then table.insert(response_lines, line_processed) end
-      elseif in_code_block then
-        table.insert(response_lines, line)
-      end
-    end
+    local response_lines = Selection._parse_editing_response(full_response)
     if #response_lines == 1 then
       local first_line = response_lines[1]
       local first_line_indentation = Utils.get_indentation(first_line)
