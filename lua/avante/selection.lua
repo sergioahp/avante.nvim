@@ -196,7 +196,7 @@ function Selection:submit_input(input)
   -- Resolution order: per-provider override -> global default -> 0.
   -- An explicit 0 anywhere disables coalescing for that scope. Lua's `or`
   -- chains correctly here because 0 is truthy; only nil falls through.
-  local provider_cfg = Provider.get_config()
+  local provider_cfg = Provider.get_config(Config.provider)
   local interval_ms = (provider_cfg and provider_cfg.edit_stream_flush_interval_ms)
     or Config.selection.edit_stream_flush_interval_ms
     or 0
