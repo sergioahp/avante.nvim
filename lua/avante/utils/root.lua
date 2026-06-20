@@ -209,6 +209,33 @@ function M.get(opts)
     M.cache[buf] = ret
   end
   if cwd ~= nil and #ret > #cwd then ret = cwd end
+  -- Avoid scoping the project to the entire home directory (or filesystem root)
+  -- when the buffer lives outside any project. With no VCS/project marker above
+  -- it, detection falls back to cwd, which is often $HOME, and then every
+  -- glob/grep scans all of $HOME and buries real results. In that degenerate
+  -- case anchor to a real file's directory instead: the current buffer if it is
+  -- a file, otherwise a file buffer from any open window. The latter matters
+  -- because tools may run while an Avante UI buffer (buftype=nofile) is focused
+  -- while the code window with the actual file is still visible beside it.
+  local home = vim.uv.os_homedir()
+  local rret = M.realpath(ret)
+  if rret and (rret == M.realpath(home) or rret == "/") then
+    local function file_dir(b)
+      if not (b and vim.api.nvim_buf_is_valid(b)) then return nil end
+      if vim.bo[b].buftype ~= "" then return nil end
+      local p = M.bufpath(b)
+      if not p or p:sub(1, 1) ~= "/" then return nil end
+      return vim.fs.dirname(p)
+    end
+    local dir = file_dir(buf)
+    if not dir then
+      for _, win in ipairs(vim.api.nvim_list_wins()) do
+        dir = file_dir(vim.api.nvim_win_get_buf(win))
+        if dir then break end
+      end
+    end
+    if dir and dir ~= rret then ret = dir end
+  end
   if opts and opts.normalize then return ret end
   return Utils.is_win() and ret:gsub("/", "\\") or ret
 end
