@@ -6,6 +6,7 @@ local RepoMap = require("avante.repo_map")
 local PromptInput = require("avante.ui.prompt_input")
 local SelectionResult = require("avante.selection_result")
 local Range = require("avante.range")
+local Morph = require("avante.morph")
 
 local api = vim.api
 local fn = vim.fn
@@ -255,6 +256,66 @@ function Selection:submit_input(input)
 
   local instructions = "Do not call any tools and just response the request: " .. input
 
+  -- Fast-apply path: the configured (fast) provider drafts a lazy edit snippet
+  -- using editing_morph.avanterules, then the Morph apply model merges it into the
+  -- selection. We don't stream the draft into the buffer (it's markers, not final
+  -- code); we collect it, apply, then replace the selected lines in one shot.
+  -- Falls back to the inline <code> replacement when Morph isn't configured.
+  local morph_provider = Provider["morph"]
+  local use_morph = Config.selection.fastapply and morph_provider ~= nil and morph_provider.is_env_set()
+
+  ---@type AvanteLLMChunkCallback
+  local function on_chunk_morph(chunk)
+    if flusher.done then return end
+    flusher.full_response = flusher.full_response .. chunk
+  end
+
+  ---@type AvanteLLMStopCallback
+  local function on_stop_morph(stop_opts)
+    if stop_opts.error then
+      if type(stop_opts.error) == "table" and stop_opts.error.exit == nil and stop_opts.error.stderr == "{}" then
+        return
+      end
+      if self.prompt_input then self.prompt_input:stop_spinner() end
+      Utils.error("Error drafting the edit: " .. vim.inspect(stop_opts.error), { once = true, title = "Avante" })
+      return
+    end
+    if flusher.done then return end
+    flusher.done = true
+    local draft = flusher.full_response
+    if draft == nil or draft == "" then
+      if self.prompt_input then self.prompt_input:stop_spinner() end
+      Utils.error("Empty draft from the model", { once = true, title = "Avante" })
+      return
+    end
+    -- Boring, surgical apply instruction; the actual change lives in <update>.
+    local morph_instruction = "Apply the update to the selected code. Preserve all unrelated code, "
+      .. "formatting, and comments exactly. Return only the complete updated code, with no markdown "
+      .. "fences and no explanation."
+    Morph.apply(self.selection.content, draft, morph_instruction, function(merged, err)
+      if self.prompt_input then self.prompt_input:stop_spinner() end
+      if err or merged == nil then
+        Utils.error("Morph apply failed: " .. (err or "unknown error"), { once = true, title = "Avante" })
+        return
+      end
+      local lines = vim.split(merged, "\n")
+      if #lines > 1 and lines[#lines] == "" then table.remove(lines) end
+      if not api.nvim_buf_is_valid(self.code_bufnr) then return end
+      pcall(
+        function()
+          api.nvim_buf_set_lines(
+            self.code_bufnr,
+            self.selection.range.start.lnum - 1,
+            self.selection.range.finish.lnum,
+            true,
+            lines
+          )
+        end
+      )
+      vim.defer_fn(function() self:close_editing_input() end, 0)
+    end)
+  end
+
   Llm.stream({
     ask = true,
     project_context = vim.json.encode(project_context),
@@ -263,11 +324,11 @@ function Selection:submit_input(input)
     code_lang = filetype,
     selected_code = selected_code,
     instructions = instructions,
-    mode = "editing",
+    mode = use_morph and "editing_morph" or "editing",
     on_start = on_start,
-    on_chunk = on_chunk,
+    on_chunk = use_morph and on_chunk_morph or on_chunk,
     on_reasoning_chunk = function() end,
-    on_stop = on_stop,
+    on_stop = use_morph and on_stop_morph or on_stop,
   })
 end
 

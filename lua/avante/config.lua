@@ -1061,10 +1061,16 @@ M._defaults = {
   --- providers may override this by setting the same field on their own config
   --- (e.g. providers.claude.edit_stream_flush_interval_ms = 16 for a fast model,
   --- or = 0 to opt that provider out of coalescing entirely).
+  --- @field fastapply boolean Route the visual-selection edit through the Morph
+  --- fast-apply model: the configured provider drafts a lazy edit snippet
+  --- (editing_morph.avanterules), then the `morph` provider merges it into the
+  --- selection. Requires the `morph` provider configured (MORPH_API_KEY). When off
+  --- (default) the selection edit uses the inline <code> replacement.
   selection = {
     enabled = true,
     hint_display = "delayed",
     edit_stream_flush_interval_ms = 33,
+    fastapply = false,
   },
   --- @class AvanteRepoMapConfig
   repo_map = {
