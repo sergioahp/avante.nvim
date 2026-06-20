@@ -322,8 +322,10 @@ function M:parse_messages(opts)
               if last_message and last_message.role == self.role_map["assistant"] and last_message.tool_calls then
                 last_message.tool_calls = vim.list_extend(last_message.tool_calls, tool_calls)
 
-                last_message.reasoning_content = pending_reasoning_content or ""
-                pending_reasoning_content = nil
+                if pending_reasoning_content then
+                  last_message.reasoning_content = pending_reasoning_content
+                  pending_reasoning_content = nil
+                end
 
                 if not last_message.content then last_message.content = "" end
               else
@@ -333,8 +335,10 @@ function M:parse_messages(opts)
                   content = "",
                 }
 
-                tool_call_message.reasoning_content = pending_reasoning_content or ""
-                pending_reasoning_content = nil
+                if pending_reasoning_content then
+                  tool_call_message.reasoning_content = pending_reasoning_content
+                  pending_reasoning_content = nil
+                end
 
                 table.insert(messages, tool_call_message)
               end
