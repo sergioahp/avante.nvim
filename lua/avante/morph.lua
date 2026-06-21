@@ -78,4 +78,55 @@ function M.apply(original_code, update, instructions, on_complete)
   )
 end
 
+---Confine a whole-file Morph merge back to the originally selected region.
+---When Morph is handed the entire file as context (so it can place an anchored
+---edit accurately) it returns the whole merged file. This checks that every line
+---OUTSIDE the selection is byte-identical to the original and returns just the new
+---lines that replace the selection. It is the client-side guard against Morph
+---editing the wrong place -- e.g. an unanchored snippet landing on a different,
+---similar-looking row elsewhere in the file.
+---@param orig_lines string[] original whole-buffer lines (1-indexed)
+---@param merged_lines string[] Morph's merged whole-buffer lines
+---@param start_lnum integer 1-indexed first line of the selection
+---@param finish_lnum integer 1-indexed last line of the selection
+---@return string[]|nil region_lines new lines for the selection, or nil on mismatch
+---@return string|nil err where the merge strayed outside the selected region
+function M.scoped_region_change(orig_lines, merged_lines, start_lnum, finish_lnum)
+  -- Trailing blank lines at EOF are not meaningful and Morph routinely normalizes
+  -- them (e.g. drops a final empty line). Ignore them on both sides so a benign
+  -- EOF whitespace change outside the selection doesn't reject a clean merge. We
+  -- never trim past the end of the selection, so this stays purely about EOF.
+  local function content_len(t)
+    local n = #t
+    while n > 0 and t[n]:match("^%s*$") do
+      n = n - 1
+    end
+    return n
+  end
+  local orig_n = math.max(content_len(orig_lines), finish_lnum)
+  local merged_n = content_len(merged_lines)
+
+  local n_before = start_lnum - 1
+  local n_after = orig_n - finish_lnum
+  if n_before < 0 or n_after < 0 then return nil, "selection range out of bounds" end
+  if merged_n < n_before + n_after then
+    return nil, "merged output is shorter than the unchanged context around the selection"
+  end
+  for i = 1, n_before do
+    if merged_lines[i] ~= orig_lines[i] then
+      return nil, ("Morph changed line %d, before the selected region"):format(i)
+    end
+  end
+  for k = 0, n_after - 1 do
+    if merged_lines[merged_n - k] ~= orig_lines[orig_n - k] then
+      return nil, ("Morph changed line %d, after the selected region"):format(orig_n - k)
+    end
+  end
+  local region = {}
+  for i = n_before + 1, merged_n - n_after do
+    region[#region + 1] = merged_lines[i]
+  end
+  return region, nil
+end
+
 return M

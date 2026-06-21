@@ -254,15 +254,79 @@ function Selection:submit_input(input)
     }
   end
 
-  local instructions = "Do not call any tools and just response the request: " .. input
-
-  -- Fast-apply path: the configured (fast) provider drafts a lazy edit snippet
-  -- using editing_morph.avanterules, then the Morph apply model merges it into the
-  -- selection. We don't stream the draft into the buffer (it's markers, not final
-  -- code); we collect it, apply, then replace the selected lines in one shot.
-  -- Falls back to the inline <code> replacement when Morph isn't configured.
+  -- Fast-apply path: the configured (fast) provider drafts the edit by CALLING the
+  -- edit_file tool (Morph's documented draft format: path/instructions/code_edit with
+  -- `// ... existing code ...` markers). We capture that single tool call, hand Morph
+  -- the WHOLE file as context plus the model's first-person instruction, then confine
+  -- the merge back to the selected region client-side. Falls back to the inline <code>
+  -- replacement when Morph isn't configured.
   local morph_provider = Provider["morph"]
   local use_morph = Config.selection.fastapply and morph_provider ~= nil and morph_provider.is_env_set()
+
+  -- The non-fast-apply path returns the full <code> region inline, so we forbid tool
+  -- calls there. The fast-apply path needs the edit_file tool, so leave tools enabled.
+  local instructions = use_morph and input or ("Do not call any tools and just response the request: " .. input)
+
+  local Helpers = require("avante.llm_tools.helpers")
+  -- The model's single edit_file call lands here.
+  local captured = {}
+  local edit_file_tool = {
+    name = "edit_file",
+    description = "Propose an edit to the selected region. A faster, less capable model applies it, so write "
+      .. "the change as a sketch: only the lines you are changing, with a `// ... existing code ...` comment "
+      .. "(in the file's language) standing in for every unchanged span. Call this tool exactly once.",
+    param = {
+      type = "table",
+      fields = {
+        { name = "path", type = "string", description = "The target file path to modify." },
+        {
+          name = "instructions",
+          type = "string",
+          description = 'A single first-person sentence describing the edit, e.g. "I am filling in the z-row '
+            .. 'of the tableau". Used to disambiguate where the edit applies.',
+        },
+        {
+          name = "code_edit",
+          type = "string",
+          description = "Only the changed lines, with `// ... existing code ...` markers for every unchanged "
+            .. "span. Keep enough surrounding context to anchor the edit; never omit code without a marker.",
+        },
+      },
+    },
+    returns = {
+      { name = "success", type = "boolean", description = "Whether the edit was captured" },
+    },
+    func = function(tool_input)
+      captured.path = tool_input.path
+      captured.instructions = tool_input.instructions
+      captured.code_edit = tool_input.code_edit
+      -- End the draft turn after this single tool call rather than letting the agent
+      -- loop re-prompt the model; we run the Morph apply ourselves in on_stop_morph.
+      -- CANCEL_TOKEN is the framework's "this tool ended the turn" signal.
+      return nil, Helpers.CANCEL_TOKEN
+    end,
+  }
+
+  -- Minimal history harness so the stream's tool loop can find the pending tool call.
+  local history_messages = {}
+  local function on_messages_add(msgs)
+    msgs = vim.islist(msgs) and msgs or { msgs }
+    for _, msg in ipairs(msgs) do
+      local idx
+      for i, m in ipairs(history_messages) do
+        if m.uuid == msg.uuid then
+          idx = i
+          break
+        end
+      end
+      if idx then
+        history_messages[idx] = msg
+      else
+        table.insert(history_messages, msg)
+      end
+    end
+  end
+  local function get_history_messages() return history_messages end
 
   ---@type AvanteLLMChunkCallback
   local function on_chunk_morph(chunk)
@@ -272,6 +336,8 @@ function Selection:submit_input(input)
 
   ---@type AvanteLLMStopCallback
   local function on_stop_morph(stop_opts)
+    -- A real streaming error aborts; the tool-ended-turn "cancelled" stop carries no
+    -- error and falls through to the apply below.
     if stop_opts.error then
       if type(stop_opts.error) == "table" and stop_opts.error.exit == nil and stop_opts.error.stderr == "{}" then
         return
@@ -282,24 +348,44 @@ function Selection:submit_input(input)
     end
     if flusher.done then return end
     flusher.done = true
-    local draft = flusher.full_response
-    if draft == nil or draft == "" then
+
+    -- Prefer the tool call; fall back to raw text if the model answered inline.
+    local code_edit = captured.code_edit
+    if (code_edit == nil or code_edit == "") and flusher.full_response ~= "" then code_edit = flusher.full_response end
+    if code_edit == nil or code_edit == "" then
       if self.prompt_input then self.prompt_input:stop_spinner() end
-      Utils.error("Empty draft from the model", { once = true, title = "Avante" })
+      Utils.error("The model did not produce an edit", { once = true, title = "Avante" })
       return
     end
-    -- Boring, surgical apply instruction; the actual change lives in <update>.
-    local morph_instruction = "Apply the update to the selected code. Preserve all unrelated code, "
-      .. "formatting, and comments exactly. Return only the complete updated code, with no markdown "
-      .. "fences and no explanation."
-    Morph.apply(self.selection.content, draft, morph_instruction, function(merged, err)
+    local morph_instruction = captured.instructions
+    if morph_instruction == nil or morph_instruction == "" then
+      morph_instruction = "Apply the update to the selected region only, leaving the rest of the file unchanged."
+    end
+
+    -- Whole file as context so Morph can anchor the snippet accurately; the markers
+    -- plus the instruction tell it where to apply.
+    Morph.apply(code_content, code_edit, morph_instruction, function(merged, err)
       if self.prompt_input then self.prompt_input:stop_spinner() end
       if err or merged == nil then
         Utils.error("Morph apply failed: " .. (err or "unknown error"), { once = true, title = "Avante" })
         return
       end
-      local lines = vim.split(merged, "\n")
-      if #lines > 1 and lines[#lines] == "" then table.remove(lines) end
+      local merged_lines = vim.split(merged, "\n")
+      if #merged_lines > 1 and merged_lines[#merged_lines] == "" then table.remove(merged_lines) end
+      -- Client-side guard: make sure Morph only touched the selected region.
+      local region, verr = Morph.scoped_region_change(
+        code_lines,
+        merged_lines,
+        self.selection.range.start.lnum,
+        self.selection.range.finish.lnum
+      )
+      if region == nil then
+        Utils.error(
+          "Morph edit rejected: " .. verr .. ". The buffer was left unchanged.",
+          { once = true, title = "Avante" }
+        )
+        return
+      end
       if not api.nvim_buf_is_valid(self.code_bufnr) then return end
       pcall(
         function()
@@ -308,7 +394,7 @@ function Selection:submit_input(input)
             self.selection.range.start.lnum - 1,
             self.selection.range.finish.lnum,
             true,
-            lines
+            region
           )
         end
       )
@@ -325,6 +411,9 @@ function Selection:submit_input(input)
     selected_code = selected_code,
     instructions = instructions,
     mode = use_morph and "editing_morph" or "editing",
+    tools = use_morph and { edit_file_tool } or nil,
+    get_history_messages = use_morph and get_history_messages or nil,
+    on_messages_add = use_morph and on_messages_add or nil,
     on_start = on_start,
     on_chunk = use_morph and on_chunk_morph or on_chunk,
     on_reasoning_chunk = function() end,
