@@ -1068,14 +1068,14 @@ M._defaults = {
   --- the selected region client-side. Requires the `morph` provider configured
   --- (MORPH_API_KEY). When off (default) the selection edit uses the inline <code>
   --- replacement.
-  --- @field diff_highlight_timeout_ms integer Duration for token-level highlights
+  --- @field diff_highlight_timeout_ms integer Duration for visual-selection edit highlights
   --- after a successful visual-selection edit. 0 disables the highlight.
   selection = {
     enabled = true,
     hint_display = "delayed",
     edit_stream_flush_interval_ms = 33,
     fastapply = false,
-    diff_highlight_timeout_ms = 1500,
+    diff_highlight_timeout_ms = 100,
   },
   --- @class AvanteRepoMapConfig
   repo_map = {

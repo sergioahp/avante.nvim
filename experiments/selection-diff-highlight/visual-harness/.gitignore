@@ -1,0 +1,4 @@
+# Generated screenshots and isolated nvim/tmux state.
+/out/
+/sequences/
+/.state/

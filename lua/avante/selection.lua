@@ -143,6 +143,10 @@ function Selection:submit_input(input)
     finish_line = self.selection.range.finish.lnum,
     need_prepend_indentation = false,
     original_first_line_indentation = Utils.get_indentation(code_lines[self.selection.range.start.lnum]),
+    delete_flash_attempted = false,
+    delete_flash_pending = false,
+    response_complete = false,
+    after_pending_flush = nil,
   }
 
   if self.prompt_input then self.prompt_input:start_spinner() end
@@ -150,9 +154,13 @@ function Selection:submit_input(input)
   ---@type AvanteLLMStartCallback
   local function on_start(_) end
 
-  local function do_flush()
-    if flusher.done then return end
-    if not api.nvim_buf_is_valid(self.code_bufnr) then return end
+  local function do_flush(on_applied)
+    if flusher.done then return false end
+    if flusher.delete_flash_pending then
+      if on_applied then flusher.after_pending_flush = on_applied end
+      return false
+    end
+    if not api.nvim_buf_is_valid(self.code_bufnr) then return false end
     local response_lines_ = vim.split(flusher.full_response, "\n")
     local response_lines = {}
     local in_code_block = false
@@ -180,12 +188,41 @@ function Selection:submit_input(input)
         response_lines[i] = flusher.original_first_line_indentation .. line
       end
     end
-    pcall(
+
+    if not flusher.delete_flash_attempted then
+      if #response_lines == 0 then return false end
+      if not flusher.response_complete and #response_lines < #original_selection_lines then return false end
+
+      flusher.delete_flash_attempted = true
+      local delayed = SelectionDiffHighlight.flash_deletions_before(
+        self.code_bufnr,
+        original_selection_lines,
+        response_lines,
+        flusher.start_line,
+        function()
+          local after_pending_flush = flusher.after_pending_flush or on_applied
+          flusher.after_pending_flush = nil
+          flusher.delete_flash_pending = false
+          do_flush(after_pending_flush)
+        end
+      )
+      if delayed then
+        flusher.delete_flash_pending = true
+        return false
+      end
+    end
+
+    local ok = pcall(
       function()
         api.nvim_buf_set_lines(self.code_bufnr, flusher.start_line - 1, flusher.finish_line, true, response_lines)
       end
     )
-    flusher.finish_line = flusher.start_line + #response_lines - 1
+    if ok then
+      flusher.finish_line = flusher.start_line + #response_lines - 1
+      if on_applied then on_applied() end
+    end
+
+    return ok
   end
 
   -- No args: Utils.throttle captures args at schedule time, but do_flush reads
@@ -206,8 +243,8 @@ function Selection:submit_input(input)
     if flusher.done then return end
     local was_empty = flusher.full_response == ""
     flusher.full_response = flusher.full_response .. chunk
-    -- Leading edge: show the first chunk immediately so the user doesn't see
-    -- `interval_ms` of blank latency after pressing submit.
+    -- Leading edge: try to show the first usable replacement before waiting
+    -- for the throttle interval.
     if was_empty then
       do_flush()
     else
@@ -228,18 +265,24 @@ function Selection:submit_input(input)
       )
       return
     end
+    local function finish()
+      if flusher.done then return end
+      flusher.done = true
+      if self.prompt_input then self.prompt_input:stop_spinner() end
+      if api.nvim_buf_is_valid(self.code_bufnr) then
+        local new_selection_lines =
+          api.nvim_buf_get_lines(self.code_bufnr, flusher.start_line - 1, flusher.finish_line, false)
+        SelectionDiffHighlight.show(self.code_bufnr, original_selection_lines, new_selection_lines, flusher.start_line)
+      end
+      vim.defer_fn(function() self:close_editing_input() end, 0)
+      Utils.debug("full response:", flusher.full_response)
+    end
+
     -- Final synchronous flush so the tail chunks land before we tear down,
     -- then block any pending throttle timer from firing on stale state.
-    do_flush()
-    flusher.done = true
-    if self.prompt_input then self.prompt_input:stop_spinner() end
-    if api.nvim_buf_is_valid(self.code_bufnr) then
-      local new_selection_lines =
-        api.nvim_buf_get_lines(self.code_bufnr, flusher.start_line - 1, flusher.finish_line, false)
-      SelectionDiffHighlight.show(self.code_bufnr, original_selection_lines, new_selection_lines, flusher.start_line)
-    end
-    vim.defer_fn(function() self:close_editing_input() end, 0)
-    Utils.debug("full response:", flusher.full_response)
+    flusher.response_complete = true
+    local applied = do_flush(finish)
+    if not applied and not flusher.delete_flash_pending then finish() end
   end
 
   local filetype = api.nvim_get_option_value("filetype", { buf = self.code_bufnr })
@@ -394,22 +437,41 @@ function Selection:submit_input(input)
         )
         return
       end
-      if not api.nvim_buf_is_valid(self.code_bufnr) then return end
-      local ok = pcall(
-        function()
-          api.nvim_buf_set_lines(
+      local function apply_region()
+        if not api.nvim_buf_is_valid(self.code_bufnr) then return end
+        local ok = pcall(
+          function()
+            api.nvim_buf_set_lines(
+              self.code_bufnr,
+              self.selection.range.start.lnum - 1,
+              self.selection.range.finish.lnum,
+              true,
+              region
+            )
+          end
+        )
+        if ok then
+          SelectionDiffHighlight.show(
             self.code_bufnr,
-            self.selection.range.start.lnum - 1,
-            self.selection.range.finish.lnum,
-            true,
-            region
+            original_selection_lines,
+            region,
+            self.selection.range.start.lnum
           )
         end
-      )
-      if ok then
-        SelectionDiffHighlight.show(self.code_bufnr, original_selection_lines, region, self.selection.range.start.lnum)
+        vim.defer_fn(function() self:close_editing_input() end, 0)
       end
-      vim.defer_fn(function() self:close_editing_input() end, 0)
+
+      if
+        not SelectionDiffHighlight.flash_deletions_before(
+          self.code_bufnr,
+          original_selection_lines,
+          region,
+          self.selection.range.start.lnum,
+          apply_region
+        )
+      then
+        apply_region()
+      end
     end)
   end
 
