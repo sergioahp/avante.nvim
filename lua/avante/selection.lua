@@ -5,6 +5,7 @@ local Provider = require("avante.providers")
 local RepoMap = require("avante.repo_map")
 local PromptInput = require("avante.ui.prompt_input")
 local SelectionResult = require("avante.selection_result")
+local SelectionDiffHighlight = require("avante.selection_diff_highlight")
 local Range = require("avante.range")
 local Morph = require("avante.morph")
 
@@ -129,6 +130,8 @@ function Selection:submit_input(input)
   end
   local code_lines = api.nvim_buf_get_lines(self.code_bufnr, 0, -1, false)
   local code_content = table.concat(code_lines, "\n")
+  local original_selection_lines =
+    vim.list_slice(code_lines, self.selection.range.start.lnum, self.selection.range.finish.lnum)
 
   -- Shared mutable state for the streaming edit. on_chunk only mutates fields
   -- here; do_flush reads them at fire time. See spec: closures over a single
@@ -230,6 +233,11 @@ function Selection:submit_input(input)
     do_flush()
     flusher.done = true
     if self.prompt_input then self.prompt_input:stop_spinner() end
+    if api.nvim_buf_is_valid(self.code_bufnr) then
+      local new_selection_lines =
+        api.nvim_buf_get_lines(self.code_bufnr, flusher.start_line - 1, flusher.finish_line, false)
+      SelectionDiffHighlight.show(self.code_bufnr, original_selection_lines, new_selection_lines, flusher.start_line)
+    end
     vim.defer_fn(function() self:close_editing_input() end, 0)
     Utils.debug("full response:", flusher.full_response)
   end
@@ -387,7 +395,7 @@ function Selection:submit_input(input)
         return
       end
       if not api.nvim_buf_is_valid(self.code_bufnr) then return end
-      pcall(
+      local ok = pcall(
         function()
           api.nvim_buf_set_lines(
             self.code_bufnr,
@@ -398,6 +406,9 @@ function Selection:submit_input(input)
           )
         end
       )
+      if ok then
+        SelectionDiffHighlight.show(self.code_bufnr, original_selection_lines, region, self.selection.range.start.lnum)
+      end
       vim.defer_fn(function() self:close_editing_input() end, 0)
     end)
   end

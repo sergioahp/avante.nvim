@@ -16,6 +16,7 @@ local Highlights = {
   ANNOTATION = { name = "AvanteAnnotation", link = "Comment" },
   POPUP_HINT = { name = "AvantePopupHint", link = "NormalFloat" },
   INLINE_HINT = { name = "AvanteInlineHint", link = "Keyword" },
+  SELECTION_DIFF = { name = "AvanteSelectionDiff", bg = "#3d6137", bold = true },
   TO_BE_DELETED = { name = "AvanteToBeDeleted", bg = "#ffcccc", strikethrough = true },
   TO_BE_DELETED_WITHOUT_STRIKETHROUGH = { name = "AvanteToBeDeletedWOStrikethrough", bg = "#562C30" },
   CONFIRM_TITLE = { name = "AvanteConfirmTitle", fg = "#1e222a", bg = "#e06c75" },
