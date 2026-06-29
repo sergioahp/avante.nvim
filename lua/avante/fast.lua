@@ -48,6 +48,66 @@ local edit_file_tool_param = {
   },
 }
 
+---Build the fast tool set bound to `bufnr`: a single `edit_file` that drafts to Morph
+---and lands the merge as a pending overlay (reading the buffer FRESH at call time, so
+---edits the user made since the last turn are picked up), plus an optional on-demand
+---`get_diagnostics`. The Morph result is never returned to the model -- it gets only a
+---tiny ack and keeps its turn for an explanation. Shared by the float prompt and the
+---sidebar/zen fast mode.
+---@param bufnr integer
+---@param opts? { with_diagnostics?: boolean, on_call?: fun(), on_applied?: fun(hunks: integer) }
+---@return table[]
+function M.make_fast_tools(bufnr, opts)
+  opts = opts or {}
+  local edit_file_tool = {
+    name = "edit_file",
+    description = "Make the requested change to the current file. A faster apply model merges your draft, so "
+      .. "write only the lines you change, with a `// ... existing code ...` marker for every unchanged span. "
+      .. "Put ALL of your edits in this one call.",
+    param = edit_file_tool_param,
+    returns = { { name = "success", type = "boolean", description = "Whether the edit was accepted for apply" } },
+    func = function(tool_input, tool_opts)
+      -- Edit tools are also invoked with partial input while the call streams in;
+      -- act only on the final, complete call.
+      if tool_opts and tool_opts.streaming then return end
+      if opts.on_call then opts.on_call() end
+      if not api.nvim_buf_is_valid(bufnr) then return "The target buffer is no longer open." end
+      local code_lines = api.nvim_buf_get_lines(bufnr, 0, -1, false)
+      local code_content = table.concat(code_lines, "\n")
+      local code_edit = tool_input.code_edit or ""
+      local instruction = tool_input.instructions
+      if instruction == nil or instruction == "" then instruction = "Apply the requested change to the file." end
+      Morph.apply(code_content, code_edit, instruction, function(merged, merr)
+        if merr or merged == nil then
+          Utils.error("Morph apply failed: " .. (merr or "unknown error"), { once = true, title = "Avante" })
+          if opts.on_applied then opts.on_applied(0) end
+          return
+        end
+        local merged_lines = vim.split(merged, "\n")
+        if #merged_lines > 1 and merged_lines[#merged_lines] == "" then table.remove(merged_lines) end
+        if not api.nvim_buf_is_valid(bufnr) then return end
+        local n = PendingEdits.set(bufnr, code_lines, merged_lines)
+        if n == 0 then
+          Utils.info("Avante fast: no changes", { title = "Avante" })
+        else
+          Utils.info(
+            ("Avante fast: %d pending edit%s -- <Tab> to review"):format(n, n == 1 and "" or "s"),
+            { title = "Avante" }
+          )
+        end
+        if opts.on_applied then opts.on_applied(n) end
+      end)
+      -- Tiny ack so the model keeps its turn; it never sees the merged code.
+      return "Your edit was submitted and is now shown to the user as a pending change to review."
+    end,
+  }
+  local tools = { edit_file_tool }
+  -- The "+1": on-demand diagnostics. Returns a real result so the loop continues
+  -- and the model still has to make its edit (or answer) afterward.
+  if opts.with_diagnostics ~= false then table.insert(tools, require("avante.llm_tools.get_diagnostics")) end
+  return tools
+end
+
 ---@class avante.fast.SubmitOpts
 ---@field prompt string
 ---@field bufnr? integer target buffer (defaults to current)
@@ -98,7 +158,6 @@ function M.submit(opts)
     pcall(Path.history.save, bufnr, chat_history)
   end
 
-  local captured = {}
   local morph_started = false
   local turn_done = false
   local final_text = ""
@@ -108,67 +167,14 @@ function M.submit(opts)
     if opts.on_done then opts.on_done(result) end
   end
 
-  -- Kicked off the moment the edit_file call lands. Morph merges and the overlay
-  -- renders in the background, in parallel with the model finishing its turn. We
-  -- never hand the merge result back to the model.
-  local function start_morph()
-    if morph_started then return end
-    morph_started = true
-    local code_edit = captured.code_edit
-    if code_edit == nil or code_edit == "" then return end
-    local instruction = captured.instructions
-    if instruction == nil or instruction == "" then instruction = "Apply the requested change to the file." end
-    Morph.apply(code_content, code_edit, instruction, function(merged, merr)
-      if merr or merged == nil then
-        Utils.error("Morph apply failed: " .. (merr or "unknown error"), { once = true, title = "Avante" })
-        notify_done({ applied = false, error = merr })
-        return
-      end
-      local merged_lines = vim.split(merged, "\n")
-      if #merged_lines > 1 and merged_lines[#merged_lines] == "" then table.remove(merged_lines) end
-      if not api.nvim_buf_is_valid(bufnr) then
-        notify_done({ applied = false, error = "buffer no longer valid" })
-        return
-      end
-      local n = PendingEdits.set(bufnr, code_lines, merged_lines)
-      if n == 0 then
-        Utils.info("Avante fast: no changes", { title = "Avante" })
-      else
-        Utils.info(
-          ("Avante fast: %d pending edit%s -- <Tab> to review"):format(n, n == 1 and "" or "s"),
-          { title = "Avante" }
-        )
-      end
-      notify_done({ applied = n > 0, hunks = n })
-    end)
-  end
-
-  -- The model drafts its whole change as one edit_file call. We start Morph + the
-  -- overlay here but return only a tiny ack (never the merged code), so the model
-  -- keeps its turn and can close with a short markdown explanation for the user.
-  local edit_file_tool = {
-    name = "edit_file",
-    description = "Make the requested change to the current file. A faster apply model merges your draft, so "
-      .. "write only the lines you change, with a `// ... existing code ...` marker for every unchanged span. "
-      .. "Put ALL of your edits in this one call.",
-    param = edit_file_tool_param,
-    returns = { { name = "success", type = "boolean", description = "Whether the edit was accepted for apply" } },
-    func = function(tool_input, tool_opts)
-      -- Edit tools are also invoked with partial input while the call streams in;
-      -- act only on the final, complete call.
-      if tool_opts and tool_opts.streaming then return end
-      captured.path = tool_input.path
-      captured.instructions = tool_input.instructions
-      captured.code_edit = tool_input.code_edit
-      start_morph()
-      return "Your edit was submitted and is now shown to the user as a pending change to review."
-    end,
-  }
-
-  local tools = { edit_file_tool }
-  -- The "+1": on-demand diagnostics. Returns a real result so the loop continues
-  -- and the model still has to make its edit (or answer) afterward.
-  if opts.with_diagnostics ~= false then table.insert(tools, require("avante.llm_tools.get_diagnostics")) end
+  -- The model drafts its whole change as one edit_file call. Morph + the overlay fire
+  -- the moment it lands (in parallel with the model finishing its turn); the merge
+  -- result is never handed back, so the model keeps its turn for a markdown explanation.
+  local tools = M.make_fast_tools(bufnr, {
+    with_diagnostics = opts.with_diagnostics,
+    on_call = function() morph_started = true end,
+    on_applied = function(n) notify_done({ applied = n > 0, hunks = n }) end,
+  })
 
   -- The stream appends its assistant/tool messages straight into the session list,
   -- so the tool loop sees pending calls, reasoning rides across the get_diagnostics /

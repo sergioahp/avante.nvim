@@ -2999,6 +2999,21 @@ function Sidebar:handle_submit(request)
       get_tokens_usage = function() return self.chat_history.tokens_usage end,
     })
 
+    -- Fast chat mode: swap the agentic toolset + prompt for the minimal Morph editor.
+    -- Its single edit_file lands as a pending virtual-text overlay in the code buffer
+    -- (not sidebar conflict markers); the session, streaming and persistence stay the
+    -- sidebar's as usual, so the reply streams live here and the thread is saved.
+    if
+      Config.chat_mode == "fast"
+      and not Config.acp_providers[Config.provider]
+      and self.code.bufnr
+      and api.nvim_buf_is_valid(self.code.bufnr)
+    then
+      stream_options.mode = "fast"
+      stream_options.prompt_opts = nil -- force the fast template, ignore any saved system prompt
+      stream_options.tools = require("avante.fast").make_fast_tools(self.code.bufnr, { with_diagnostics = true })
+    end
+
     ---@param pending_compaction_history_messages avante.HistoryMessage[]
     local function on_memory_summarize(pending_compaction_history_messages)
       local history_memory = self.chat_history.memory
