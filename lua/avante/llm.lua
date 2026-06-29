@@ -1915,7 +1915,9 @@ function M._stream(opts)
       if stop_opts.reason == "cancelled" then dispatch_cancel_message() end
       local history_messages = opts.get_history_messages and opts.get_history_messages({ all = true }) or {}
       local pending_tools, pending_tool_use_messages = History.get_pending_tools(history_messages)
-      if stop_opts.reason == "complete" and Config.mode == "agentic" then
+      -- Fast mode ends a turn when the model finishes its edit + explanation; the
+      -- agentic attempt_completion/write_todos nag would force pointless extra rounds.
+      if stop_opts.reason == "complete" and Config.mode == "agentic" and opts.mode ~= "fast" then
         local completed_attempt_completion_tool_use = nil
         for idx = #history_messages, 1, -1 do
           local message = history_messages[idx]

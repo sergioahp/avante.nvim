@@ -384,7 +384,7 @@ vim.g.avante_login = vim.g.avante_login
 ---@field env table<string, string>
 ---@field auth_method string
 ---
----@alias AvanteLlmMode avante.Mode | "editing" | "suggesting"
+---@alias AvanteLlmMode avante.Mode | "editing" | "suggesting" | "fast"
 ---
 ---@class AvanteSelectedCode
 ---@field path string

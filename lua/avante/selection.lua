@@ -556,7 +556,19 @@ function Selection:create_editing_input(request, line1, line2)
 
   local prompt_input = PromptInput:new({
     default_value = request,
-    submit_callback = function(input) self:submit_input(input) end,
+    -- <Tab> off: the existing selection edit. On: hand the selection + prompt to
+    -- the fast chat, whose edits land as a pending overlay.
+    switch = { off = "edit", on = "chat" },
+    submit_callback = function(input, sopts)
+      if sopts and sopts.switch_on then
+        local selection = self.selection
+        local code_bufnr = self.code_bufnr
+        self:close_editing_input()
+        require("avante.fast").submit({ prompt = input, bufnr = code_bufnr, selection = selection })
+      else
+        self:submit_input(input)
+      end
+    end,
     cancel_callback = function() self:close_editing_input() end,
     win_opts = {
       border = Config.windows.edit.border,

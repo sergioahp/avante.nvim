@@ -201,6 +201,35 @@ function M.edit(request, line1, line2)
   end
 end
 
+---No-selection float prompt: a windowless way to talk to the fast chat. The model
+---edits the current buffer; the diff shows up as a pending virtual-text overlay you
+---review with <Tab>. The non-sticky <Tab> switch picks the engine on submit:
+---  off "morph" -> a single Morph call, nothing else (fastest);
+---  on  "chat"  -> the same plus the on-demand get_diagnostics tool (the "+1").
+---@param request? string
+function M.fast_prompt(request)
+  local bufnr = vim.api.nvim_get_current_buf()
+  local prompt_input
+  prompt_input = PromptInput:new({
+    default_value = request,
+    close_on_submit = true,
+    switch = { off = "morph", on = "chat" },
+    submit_callback = function(input, sopts)
+      require("avante.fast").submit({
+        prompt = input,
+        bufnr = bufnr,
+        with_diagnostics = sopts ~= nil and sopts.switch_on == true,
+      })
+    end,
+    win_opts = {
+      border = Config.windows.edit.border,
+      title = { { "Avante fast", "FloatTitle" } },
+    },
+    start_insert = Config.windows.edit.start_insert,
+  })
+  prompt_input:open()
+end
+
 ---@return avante.Suggestion | nil
 function M.get_suggestion()
   local _, _, suggestion = require("avante").get()

@@ -336,6 +336,17 @@ M._defaults = {
   --- - *legacy*: Uses the traditional planning method without automatic tool execution
   ---@type avante.Mode
   mode = "agentic",
+  ---@alias avante.ChatMode "agentic" | "fast"
+  --- Engine the chat surfaces (sidebar, zen mode, and the no-selection float
+  --- prompt) run on:
+  --- - *agentic* (default): the full tool-using agent.
+  --- - *fast*: a minimal, non-agentic Morph editor. One model turn drafts every
+  ---   edit as a single `edit_file` call (Morph applies it), edits land as
+  ---   pending virtual-text hunks in the code buffer, and the only other tool is
+  ---   an on-demand `get_diagnostics`. Tuned for sub-3s, native-tool-call models
+  ---   (e.g. gpt-oss); requires the `morph` provider (MORPH_API_KEY).
+  ---@type avante.ChatMode
+  chat_mode = "agentic",
   ---@alias avante.ProviderName "claude" | "openai" | "azure" | "gemini" | "vertex" | "cohere" | "copilot" | "bedrock" | "ollama" | "watsonx_code_assistant" | "mistral" | string
   provider = "claude",
   auto_suggestions_provider = nil,

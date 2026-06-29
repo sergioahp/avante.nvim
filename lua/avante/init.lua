@@ -201,6 +201,12 @@ function H.keymaps()
     noremap = true,
   })
   vim.keymap.set("v", "<Plug>(AvanteEdit)", function() require("avante.api").edit() end, { noremap = true })
+  vim.keymap.set(
+    "n",
+    "<Plug>(AvanteFastPrompt)",
+    function() require("avante.api").fast_prompt() end,
+    { noremap = true }
+  )
   vim.keymap.set("n", "<Plug>(AvanteStop)", function() require("avante.api").stop() end, { noremap = true })
   vim.keymap.set("n", "<Plug>(AvanteRefresh)", function() require("avante.api").refresh() end, { noremap = true })
   vim.keymap.set("n", "<Plug>(AvanteFocus)", function() require("avante.api").focus() end, { noremap = true })
@@ -265,6 +271,12 @@ function H.keymaps()
       { desc = "avante: create new ask" }
     )
     Utils.safe_keymap_set("v", Config.mappings.edit, "<Plug>(AvanteEdit)", { desc = "avante: edit" })
+    Utils.safe_keymap_set(
+      "n",
+      Config.mappings.edit,
+      "<Plug>(AvanteFastPrompt)",
+      { desc = "avante: fast edit / chat" }
+    )
     Utils.safe_keymap_set("n", Config.mappings.stop, "<Plug>(AvanteStop)", { desc = "avante: stop" })
     Utils.safe_keymap_set("n", Config.mappings.refresh, "<Plug>(AvanteRefresh)", { desc = "avante: refresh" })
     Utils.safe_keymap_set("n", Config.mappings.focus, "<Plug>(AvanteFocus)", { desc = "avante: focus" })

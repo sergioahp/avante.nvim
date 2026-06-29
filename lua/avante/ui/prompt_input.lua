@@ -19,16 +19,24 @@ local Utils = require("avante.utils")
 ---@field spinner_active boolean
 ---@field default_value string | nil
 ---@field popup_hint_id integer | nil
+---@field switch avante.ui.PromptInputSwitch | nil
+---@field switch_on boolean
 local PromptInput = {}
 PromptInput.__index = PromptInput
 
+---@class avante.ui.PromptInputSwitch
+---@field off string label shown when the switch is off (e.g. "morph")
+---@field on string label shown when the switch is on (e.g. "chat")
+---@field default_on? boolean initial state when the prompt opens (default false)
+
 ---@class avante.ui.PromptInputOptions
 ---@field start_insert? boolean
----@field submit_callback? fun(input: string):nil
+---@field submit_callback? fun(input: string, opts: { switch_on: boolean }):nil
 ---@field cancel_callback? fun():nil
 ---@field close_on_submit? boolean
 ---@field win_opts? table
 ---@field default_value? string
+---@field switch? avante.ui.PromptInputSwitch a <Tab>-toggled routing switch, non-sticky
 
 ---@param opts? avante.ui.PromptInputOptions
 function PromptInput:new(opts)
@@ -44,6 +52,8 @@ function PromptInput:new(opts)
   obj.close_on_submit = opts.close_on_submit or false
   obj.win_opts = opts.win_opts
   obj.default_value = opts.default_value
+  obj.switch = opts.switch
+  obj.switch_on = false
   obj.spinner_chars = Config.windows.spinner.editing
   obj.spinner_index = 1
   obj.spinner_timer = nil
@@ -54,6 +64,9 @@ end
 
 function PromptInput:open()
   self:close()
+
+  -- Non-sticky: the switch always starts from its default each time the prompt opens.
+  self.switch_on = self.switch ~= nil and self.switch.default_on == true
 
   local bufnr = api.nvim_create_buf(false, true)
   self.bufnr = bufnr
@@ -125,8 +138,9 @@ function PromptInput:cancel()
 end
 
 function PromptInput:submit(input)
+  local switch_on = self.switch_on
   if self.close_on_submit then self:close() end
-  if self.submit_callback then self.submit_callback(input) end
+  if self.submit_callback then self.submit_callback(input, { switch_on = switch_on }) end
 end
 
 function PromptInput:show_shortcuts_hints()
@@ -140,6 +154,12 @@ function PromptInput:show_shortcuts_hints()
 
   local hint_text = (vim.fn.mode() ~= "i" and Config.mappings.submit.normal or Config.mappings.submit.insert)
     .. ": submit"
+
+  if self.switch then
+    local active = self.switch_on and self.switch.on or self.switch.off
+    local other = self.switch_on and self.switch.off or self.switch.on
+    hint_text = string.format("[%s] <Tab>:%s  %s", active, other, hint_text)
+  end
 
   local display_text = hint_text
 
@@ -248,6 +268,15 @@ function PromptInput:setup_keymaps()
   end
   for _, key in ipairs(Config.mappings.cancel.insert) do
     vim.keymap.set("i", key, function() self:cancel() end, { buffer = bufnr })
+  end
+
+  -- <Tab> flips the routing switch without submitting; the indicator updates live.
+  if self.switch then
+    local function toggle()
+      self.switch_on = not self.switch_on
+      self:show_shortcuts_hints()
+    end
+    vim.keymap.set({ "i", "n" }, "<Tab>", toggle, { buffer = bufnr, noremap = true, silent = true })
   end
 end
 
