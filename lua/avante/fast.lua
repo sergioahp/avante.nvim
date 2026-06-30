@@ -9,6 +9,14 @@ local Path = require("avante.path")
 
 local api = vim.api
 
+-- Per-buffer generation counter. A model can fire several `edit_file` calls in one
+-- turn (it is told to do one, but does not always), and each starts an async Morph
+-- apply. Without this, the overlay would reflect whichever HTTP response lands last
+-- -- which can be an earlier, superseded edit -- not the model's latest intent. Each
+-- call bumps the counter; a Morph completion paints the overlay only if it is still
+-- the newest call for that buffer, so stale results are dropped and the last edit wins.
+local apply_seq = {}
+
 ---Fast chat: a minimal, non-agentic Morph editor. One model turn drafts every edit
 ---as a single `edit_file` call; Morph merges it whole-file; the diff lands as a
 ---pending virtual-text overlay (see `avante.pending_edits`) instead of being written.
@@ -77,7 +85,11 @@ function M.make_fast_tools(bufnr, opts)
       local code_edit = tool_input.code_edit or ""
       local instruction = tool_input.instructions
       if instruction == nil or instruction == "" then instruction = "Apply the requested change to the file." end
+      apply_seq[bufnr] = (apply_seq[bufnr] or 0) + 1
+      local my_seq = apply_seq[bufnr]
       Morph.apply(code_content, code_edit, instruction, function(merged, merr)
+        -- A newer edit_file call has superseded this one; drop the stale result.
+        if apply_seq[bufnr] ~= my_seq then return end
         if merr or merged == nil then
           Utils.error("Morph apply failed: " .. (merr or "unknown error"), { once = true, title = "Avante" })
           if opts.on_applied then opts.on_applied(0) end
