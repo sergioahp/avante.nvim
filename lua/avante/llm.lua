@@ -357,6 +357,12 @@ function M.generate_prompts(opts)
     end
   end
 
+  if Config.unicode_math then
+    system_prompt = system_prompt
+      .. "\n\n"
+      .. [[The reply you show the user is rendered in a terminal that displays Markdown but does NOT render LaTeX or other math markup. Do not write LaTeX in your reply: avoid $...$, $$...$$, \(...\), \[...\], and commands such as \frac, \sum, \sqrt, \alpha. Write mathematics directly with Unicode instead -- Greek letters (α, β, γ, Σ, Π, μ, σ), relations and operators (≤, ≥, ≠, ≈, ×, ·, ÷, √, ∑, ∏, ∫, ∂, →), and sub/superscripts (xᵢ, x², aₙ); write fractions inline as a/b or (a + b)/c. This governs the prose you show the user; when you edit a file, keep that file's own math syntax.]]
+  end
+
   ---@type AvanteLLMMessage[]
   local context_messages = {}
   if opts.prompt_opts and opts.prompt_opts.messages then

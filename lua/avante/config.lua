@@ -347,6 +347,13 @@ M._defaults = {
   ---   (e.g. gpt-oss); requires the `morph` provider (MORPH_API_KEY).
   ---@type avante.ChatMode
   chat_mode = "agentic",
+  --- When true, the model is told that its replies are shown in a terminal that
+  --- renders Markdown but NOT LaTeX, so it should write math with Unicode (β, Σ,
+  --- √, xᵢ, a/b) rather than LaTeX ($...$, \frac, ...). Applies to the model's
+  --- prose replies in every mode; it does not change the math syntax written
+  --- inside edited files (those follow the file's own language, e.g. typst).
+  ---@type boolean
+  unicode_math = false,
   ---@alias avante.ProviderName "claude" | "openai" | "azure" | "gemini" | "vertex" | "cohere" | "copilot" | "bedrock" | "ollama" | "watsonx_code_assistant" | "mistral" | string
   provider = "claude",
   auto_suggestions_provider = nil,
