@@ -365,6 +365,14 @@ M._defaults = {
   -- For most providers that we support we will determine this automatically.
   -- If you wish to use a given implementation, then you can override it here.
   tokenizer = "tiktoken",
+  --- Extra instructions appended to the system prompt (after the mode template).
+  --- Either a string, or a function returning a string -- the function is called
+  --- per request with a context table, so you can tailor instructions to the file
+  --- or project (e.g. a typst-only reminder, or cwd-based rules). Return "" to add
+  --- nothing. Note the model already sees the file's path and `language=` filetype,
+  --- so this is for *emphasis/extra* guidance, not for telling it the filetype.
+  ---@alias avante.SystemPromptCtx { filetype: string, filepath: string|nil, filepaths: string[], cwd: string, mode: string }
+  ---@type string | fun(ctx: avante.SystemPromptCtx): string | nil
   system_prompt = nil,
   override_prompt_dir = nil,
   rules = {

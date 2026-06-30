@@ -350,7 +350,17 @@ function M.generate_prompts(opts)
 
   if Config.system_prompt ~= nil then
     local custom_system_prompt
-    if type(Config.system_prompt) == "function" then custom_system_prompt = Config.system_prompt() end
+    if type(Config.system_prompt) == "function" then
+      -- Context so the function can tailor instructions per file/project, e.g.
+      -- a typst-only reminder. filetype is the code buffer's filetype.
+      custom_system_prompt = Config.system_prompt({
+        filetype = opts.code_lang,
+        filepath = selected_files[1] and selected_files[1].path or nil,
+        filepaths = vim.tbl_map(function(f) return f.path end, selected_files),
+        cwd = project_root,
+        mode = mode,
+      })
+    end
     if type(Config.system_prompt) == "string" then custom_system_prompt = Config.system_prompt end
     if custom_system_prompt ~= nil and custom_system_prompt ~= "" and custom_system_prompt ~= "null" then
       system_prompt = system_prompt .. "\n\n" .. custom_system_prompt
