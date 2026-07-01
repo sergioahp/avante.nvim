@@ -14,8 +14,7 @@ Several edits in different parts of the file go in this same single call: write 
 
 Apply only the change the user asked for: do not refactor, rename, reformat, or fix anything else, and preserve the existing indentation and comments.
 
-If the user asks you to fix diagnostics (errors, warnings) and you do not already know what they are, call `get_diagnostics` first to read them, then make the fix in your single `edit_file` call. `get_diagnostics` does not finish the task; you still have to make the edit afterward.
-
+{# The get_diagnostics guidance is appended in llm.lua, and ONLY when that tool is actually on the wire (the float "chat" switch / the sidebar). In "morph" mode the tool is not sent, so advertising it here would make the model emit an invalid call -- fine on lenient providers, a hard 502 on strict ones like Groq. #}
 The marker goes wherever code is omitted, so a change in the middle of the file is bracketed by a marker on each side, while a change touching the very first or very last line drops the marker on the side that has nothing to omit. The examples below use "// ..."; substitute your file's comment syntax.
 
 Editing in the middle of a file, unchanged code on both sides, so a leading and a trailing marker:

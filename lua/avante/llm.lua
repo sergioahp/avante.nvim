@@ -348,6 +348,29 @@ function M.generate_prompts(opts)
     system_prompt = Path.prompts.render_mode(mode, template_opts)
   end
 
+  -- Only tell the fast model about get_diagnostics when that tool is actually on the
+  -- wire. Fast chat ships it (sidebar, and the float/selection "chat" switch); the
+  -- float "morph" switch does not. Advertising a tool we do not send makes the model
+  -- emit an invalid call: lenient providers (Cerebras) just run it locally, but strict
+  -- ones (Groq) reject the whole request with "tool not in request.tools" (a 502). The
+  -- fast.avanterules template therefore omits this line; we append it here on demand.
+  if mode == "fast" then
+    local has_get_diagnostics = false
+    for _, tool in ipairs(opts.tools or {}) do
+      if tool.name == "get_diagnostics" then
+        has_get_diagnostics = true
+        break
+      end
+    end
+    if has_get_diagnostics then
+      system_prompt = system_prompt
+        .. "\n\n"
+        .. "If the user asks you to fix diagnostics (errors, warnings) and you do not already know what "
+        .. "they are, call `get_diagnostics` first to read them, then make the fix in your single "
+        .. "`edit_file` call. `get_diagnostics` does not finish the task; you still have to make the edit afterward."
+    end
+  end
+
   if Config.system_prompt ~= nil then
     local custom_system_prompt
     if type(Config.system_prompt) == "function" then
