@@ -78,6 +78,12 @@ function M.apply(original_code, update, instructions, on_complete)
   )
 end
 
+---@class AvanteMorphRejectDetail
+---@field where "before"|"after"|"length"
+---@field lnum? integer 1-indexed buffer line of the stray change
+---@field orig? string original content of the line that changed
+---@field merged? string what the merge turned it into
+
 ---Confine a whole-file Morph merge back to the originally selected region.
 ---When Morph is handed the entire file as context (so it can place an anchored
 ---edit accurately) it returns the whole merged file. This checks that every line
@@ -91,6 +97,7 @@ end
 ---@param finish_lnum integer 1-indexed last line of the selection
 ---@return string[]|nil region_lines new lines for the selection, or nil on mismatch
 ---@return string|nil err where the merge strayed outside the selected region
+---@return AvanteMorphRejectDetail|nil detail content-based description of the stray change, for callers that relay the rejection to a model that never sees line numbers
 function M.scoped_region_change(orig_lines, merged_lines, start_lnum, finish_lnum)
   -- Trailing blank lines at EOF are not meaningful and Morph routinely normalizes
   -- them (e.g. drops a final empty line). Ignore them on both sides so a benign
@@ -110,16 +117,20 @@ function M.scoped_region_change(orig_lines, merged_lines, start_lnum, finish_lnu
   local n_after = orig_n - finish_lnum
   if n_before < 0 or n_after < 0 then return nil, "selection range out of bounds" end
   if merged_n < n_before + n_after then
-    return nil, "merged output is shorter than the unchanged context around the selection"
+    return nil, "merged output is shorter than the unchanged context around the selection", { where = "length" }
   end
   for i = 1, n_before do
     if merged_lines[i] ~= orig_lines[i] then
-      return nil, ("Morph changed line %d, before the selected region"):format(i)
+      return nil,
+        ("Morph changed line %d, before the selected region"):format(i),
+        { where = "before", lnum = i, orig = orig_lines[i], merged = merged_lines[i] }
     end
   end
   for k = 0, n_after - 1 do
     if merged_lines[merged_n - k] ~= orig_lines[orig_n - k] then
-      return nil, ("Morph changed line %d, after the selected region"):format(orig_n - k)
+      return nil,
+        ("Morph changed line %d, after the selected region"):format(orig_n - k),
+        { where = "after", lnum = orig_n - k, orig = orig_lines[orig_n - k], merged = merged_lines[merged_n - k] }
     end
   end
   local region = {}
