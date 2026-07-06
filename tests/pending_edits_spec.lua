@@ -12,6 +12,11 @@ end
 
 local function buf_lines(buf) return api.nvim_buf_get_lines(buf, 0, -1, false) end
 
+local function pending_extmarks(buf)
+  local ns = assert(api.nvim_get_namespaces().avante_pending_edits)
+  return api.nvim_buf_get_extmarks(buf, ns, 0, -1, { details = true })
+end
+
 describe("pending_edits", function()
   after_each(function()
     -- Clean overlay state between cases on whatever buffer is current.
@@ -51,6 +56,39 @@ describe("pending_edits", function()
 
     assert.is_true(PendingEdits.accept_or_next(buf))
     assert.are.same({ "a", "b", "C", "d", "e" }, buf_lines(buf))
+  end)
+
+  it("renders one-for-one replacements as inline spans", function()
+    local original = {
+      "local first = old_name",
+      "local second = left_value",
+      "done",
+    }
+    local merged = {
+      "local first = new_name",
+      "local second = right_value",
+      "done",
+    }
+    local buf = make_buf(original)
+    local n = PendingEdits.set(buf, original, merged)
+    assert.are.equal(1, n)
+    assert.are.same(original, buf_lines(buf))
+
+    local inline_texts = {}
+    local deleted_spans = 0
+    for _, mark in ipairs(pending_extmarks(buf)) do
+      local details = mark[4]
+      assert.is_nil(details.virt_lines)
+      if details.virt_text_pos == "inline" then inline_texts[#inline_texts + 1] = details.virt_text[1][1] end
+      if details.hl_group == "AvanteToBeDeletedWOStrikethrough" then deleted_spans = deleted_spans + 1 end
+    end
+
+    table.sort(inline_texts)
+    assert.are.same({ "new", "righ" }, inline_texts)
+    assert.are.equal(2, deleted_spans)
+
+    PendingEdits.accept_all(buf)
+    assert.are.same(merged, buf_lines(buf))
   end)
 
   it("accepts a pure insertion", function()
