@@ -283,6 +283,7 @@ Prompt.custom_modes = {
   legacy = true,
   editing = true,
   suggesting = true,
+  fast_ephemeral = true,
 }
 
 Prompt.custom_prompts_contents = {}

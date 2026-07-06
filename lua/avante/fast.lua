@@ -125,6 +125,7 @@ end
 ---@field bufnr? integer target buffer (defaults to current)
 ---@field selection? avante.SelectionResult optional visual selection for extra context
 ---@field with_diagnostics? boolean expose the get_diagnostics tool (the "+1"); default true
+---@field ephemeral? boolean do not read from or write to sidebar chat history
 ---@field on_state? fun(state: "start"|"done") UI hook (spinner etc.)
 ---@field on_done? fun(result: { applied: boolean, hunks?: integer, error?: string })
 
@@ -149,12 +150,16 @@ function M.submit(opts)
   local filetype = api.nvim_get_option_value("filetype", { buf = bufnr })
   local filepath = api.nvim_buf_get_name(bufnr)
 
-  -- This prompt IS the chat window's session, just without the window: we drive the
-  -- real per-buffer history, so the exchange (and the model's reply) shows up in the
-  -- sidebar/zen when it is opened next. Prior turns are seeded as context so the
-  -- thread continues.
-  local chat_history = Path.history.load(bufnr)
-  local messages = History.get_history_messages(chat_history)
+  local ephemeral = opts.ephemeral == true
+  local chat_history = nil
+  local messages = {}
+  if not ephemeral then
+    -- Sidebar fast mode is the chat window's session: drive the real per-buffer
+    -- history so prior turns are context and the reply appears when the sidebar
+    -- opens. The floating no-selection prompt sets `ephemeral`, so it skips this.
+    chat_history = Path.history.load(bufnr)
+    messages = History.get_history_messages(chat_history)
+  end
   local user_msg = History.Message:new("user", prompt, { is_user_submission = true })
   user_msg.provider = Config.provider
   local provider_conf = Config.get_provider_config and Config.get_provider_config(Config.provider) or nil
@@ -162,6 +167,8 @@ function M.submit(opts)
   table.insert(messages, user_msg)
 
   local function persist()
+    if ephemeral then return end
+    assert(chat_history ~= nil)
     chat_history.messages = messages
     if chat_history.title == nil or chat_history.title == "" or chat_history.title == "untitled" then
       local first = vim.split(prompt, "\n")[1]
@@ -259,7 +266,7 @@ function M.submit(opts)
     -- The current prompt is the last user message in `messages`; prior turns precede
     -- it so the model has the running conversation.
     history_messages = messages,
-    mode = "fast",
+    mode = ephemeral and "fast_ephemeral" or "fast",
     tools = tools,
     get_history_messages = get_history_messages,
     on_messages_add = on_messages_add,

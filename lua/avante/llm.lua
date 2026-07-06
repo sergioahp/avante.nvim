@@ -354,7 +354,7 @@ function M.generate_prompts(opts)
   -- emit an invalid call: lenient providers (Cerebras) just run it locally, but strict
   -- ones (Groq) reject the whole request with "tool not in request.tools" (a 502). The
   -- fast.avanterules template therefore omits this line; we append it here on demand.
-  if mode == "fast" then
+  if mode == "fast" or mode == "fast_ephemeral" then
     local has_get_diagnostics = false
     for _, tool in ipairs(opts.tools or {}) do
       if tool.name == "get_diagnostics" then

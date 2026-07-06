@@ -203,7 +203,8 @@ end
 
 ---No-selection float prompt: a windowless way to talk to the fast chat. The model
 ---edits the current buffer; the diff shows up as a pending virtual-text overlay you
----review with <Tab>. The non-sticky <Tab> switch picks the engine on submit:
+---review with <Tab>. This path is intentionally ephemeral: it does not read or
+---write the sidebar chat history. The non-sticky <Tab> switch picks the engine on submit:
 ---  off "morph" -> a single Morph call, nothing else (fastest);
 ---  on  "chat"  -> the same plus the on-demand get_diagnostics tool (the "+1").
 ---@param request? string
@@ -218,6 +219,7 @@ function M.fast_prompt(request)
       require("avante.fast").submit({
         prompt = input,
         bufnr = bufnr,
+        ephemeral = true,
         with_diagnostics = sopts ~= nil and sopts.switch_on == true,
       })
     end,

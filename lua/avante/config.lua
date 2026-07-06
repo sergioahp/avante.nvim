@@ -337,8 +337,8 @@ M._defaults = {
   ---@type avante.Mode
   mode = "agentic",
   ---@alias avante.ChatMode "agentic" | "fast"
-  --- Engine the chat surfaces (sidebar, zen mode, and the no-selection float
-  --- prompt) run on:
+  --- Engine the chat surfaces (sidebar and zen mode) run on. The no-selection
+  --- float prompt uses the fast engine independently and keeps its state ephemeral.
   --- - *agentic* (default): the full tool-using agent.
   --- - *fast*: a minimal, non-agentic Morph editor. One model turn drafts every
   ---   edit as a single `edit_file` call (Morph applies it), edits land as
