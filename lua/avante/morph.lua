@@ -113,6 +113,14 @@ function M.scoped_region_change(orig_lines, merged_lines, start_lnum, finish_lnu
   local orig_n = math.max(content_len(orig_lines), finish_lnum)
   local merged_n = content_len(merged_lines)
 
+  -- Same story one level down: Morph also strips trailing whitespace from a line it
+  -- otherwise leaves alone (e.g. a stray space on the last line becomes no space).
+  -- The lines outside the selection are discarded anyway -- we only splice Morph's
+  -- region back in and keep the buffer's own copy of everything else -- so a trailing
+  -- whitespace-only difference there must not reject the whole merge. Compare the
+  -- unchanged context with trailing whitespace ignored.
+  local function same_outside(a, b) return a == b or a:gsub("%s+$", "") == b:gsub("%s+$", "") end
+
   local n_before = start_lnum - 1
   local n_after = orig_n - finish_lnum
   if n_before < 0 or n_after < 0 then return nil, "selection range out of bounds" end
@@ -120,14 +128,14 @@ function M.scoped_region_change(orig_lines, merged_lines, start_lnum, finish_lnu
     return nil, "merged output is shorter than the unchanged context around the selection", { where = "length" }
   end
   for i = 1, n_before do
-    if merged_lines[i] ~= orig_lines[i] then
+    if not same_outside(merged_lines[i], orig_lines[i]) then
       return nil,
         ("Morph changed line %d, before the selected region"):format(i),
         { where = "before", lnum = i, orig = orig_lines[i], merged = merged_lines[i] }
     end
   end
   for k = 0, n_after - 1 do
-    if merged_lines[merged_n - k] ~= orig_lines[orig_n - k] then
+    if not same_outside(merged_lines[merged_n - k], orig_lines[orig_n - k]) then
       return nil,
         ("Morph changed line %d, after the selected region"):format(orig_n - k),
         { where = "after", lnum = orig_n - k, orig = orig_lines[orig_n - k], merged = merged_lines[merged_n - k] }

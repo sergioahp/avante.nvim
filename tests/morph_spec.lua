@@ -95,6 +95,32 @@ describe("morph.scoped_region_change", function()
     assert.are.same({ "B" }, region)
   end)
 
+  -- Morph also strips a trailing space from a line it otherwise leaves alone. That
+  -- is the "space on the last line" case that used to reject a clean map expansion.
+  it("tolerates a trailing space stripped from the last line (outside the selection)", function()
+    local orig = { "a", "b", "c", "d " } -- last line has a stray trailing space
+    local merged = { "a", "B1", "B2", "c", "d" } -- selection line 2 grew; Morph stripped line 4's space
+    local region, err = Morph.scoped_region_change(orig, merged, 2, 2)
+    assert.is_nil(err)
+    assert.are.same({ "B1", "B2" }, region)
+  end)
+
+  it("tolerates trailing whitespace added before the selection", function()
+    local orig = { "a", "b", "c" }
+    local merged = { "a ", "B", "c" } -- Morph added a trailing space to line 1 (before sel line 2)
+    local region, err = Morph.scoped_region_change(orig, merged, 2, 2)
+    assert.is_nil(err)
+    assert.are.same({ "B" }, region)
+  end)
+
+  it("still rejects a non-whitespace change on the last line", function()
+    local orig = { "a", "b", "c", "d" }
+    local merged = { "a", "B", "c", "D" } -- selection line 2; line 4 really changed (d -> D)
+    local region, err = Morph.scoped_region_change(orig, merged, 2, 2)
+    assert.is_nil(region)
+    assert.is_truthy(err)
+  end)
+
   it("still rejects a real edit after the region even when EOF blanks differ", function()
     local orig = { "a", "b", "c", "d", "" }
     local merged = { "A", "b", "c", "D" } -- changed line 4 (after sel line 1) AND dropped EOF blank
