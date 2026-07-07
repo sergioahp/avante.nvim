@@ -4,27 +4,36 @@ Make the change by calling the `edit_file` tool once. Call it again only if the 
 
 - path: the file being edited (use the path shown in the selected code block).
 - instructions: a single first-person sentence describing the change, for example "I am filling in the z-row of the simplex tableau." The apply model relies on this to disambiguate where the edit goes, so make it specific.
-- code_edit: only the lines you are changing. Represent every span of unchanged code you skip with a comment in the file's language, for example "// ... existing code ..." (or "# ... existing code ..." when the line comment is #). Keep just enough unchanged context around each change to anchor it unambiguously, and repeat as few unchanged lines as possible. Never drop a span of existing code without such a marker, or the apply model may delete it.
+- code_edit: the changed lines, written exactly as they should read AFTER the edit. This is NOT a patch: never prefix a line with `+`, `-`, or `>`. For every span of unchanged code you skip, leave a landmark in its place: a comment in the file's language reading "... existing code ...", for example "// ... existing code ..." (or "# ... existing code ..." when the line comment is `#`). These landmarks are the ONLY way the apply model knows where your snippet belongs; a span of omitted code with no landmark may be deleted or duplicated. Your selection almost always has code both before and after it, so your code_edit should almost always BEGIN with a landmark and END with a landmark. Keep just enough real, unchanged anchor lines next to each change to place it unambiguously, and repeat as few unchanged lines as possible.
 
 The apply model is given the ENTIRE file as context, not just your snippet. HARD CONSTRAINT: the only code that may change is the user's selection, the code shown in the selected code block. A client-side guard compares the applied result against the original file and REJECTS the entire edit if anything outside the selection differs. The classic way to fail this check is "tidying" next to the selection: deleting or rewriting a comment just above it, dropping a blank line below it, or fixing something unrelated you noticed. Never do that, even if it looks wrong or redundant; if it matters, say so in `instructions`, but leave the code alone. Use the lines around the selection only as anchors, apply only the change the user asked for, and preserve the existing indentation and comments.
 
-If the guard rejects your draft, the tool result quotes the content that changed outside the selection and the first and last lines of the selection. Fix the draft -- usually by reproducing the anchor lines exactly or covering the omitted code with `... existing code ...` markers -- and call `edit_file` again. You get very few attempts, so make each one count.
+If the guard rejects your draft, the tool result quotes the content that changed outside the selection and the first and last lines of the selection. Fix the draft -- usually by adding the missing "... existing code ..." landmark or reproducing an anchor line exactly -- and call `edit_file` again. You get very few attempts, so make each one count.
 
-The marker goes wherever code is omitted, so a change in the middle of the file is bracketed by a marker on each side, while a change touching the very first or very last line drops the marker on the side that has nothing to omit. The examples below use "// ..."; substitute your file's comment syntax.
+Examples. A landmark goes wherever you omit code; substitute your file's comment syntax for "// ...".
 
-Editing in the middle of a file, unchanged code on both sides, so a leading and a trailing marker:
+Changing something in the MIDDLE of a file (the usual case) -- unchanged code on both sides, so a landmark leads and a landmark trails:
 
 // ... existing code ...
   total = subtotal * (1 + tax_rate)
 // ... existing code ...
 
-Editing the start of a file, nothing precedes the change, so only a trailing marker:
+Replacing a short block with a longer one, still mid-file -- keep one anchor line, write the new body, and bracket the whole thing with landmarks:
+
+// ... existing code ...
+  const palette = {
+    red: "#e00", amber: "#fa0",
+    green: "#0c0",
+  }
+// ... existing code ...
+
+Editing the START of a file -- nothing precedes the change, so only a trailing landmark:
 
 import logging
 log = logging.getLogger(__name__)
 # ... existing code ...
 
-Editing the end of a file, nothing follows the change, so only a leading marker:
+Editing the END of a file -- nothing follows the change, so only a leading landmark:
 
 // ... existing code ...
   flush()
