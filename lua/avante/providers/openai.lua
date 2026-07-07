@@ -165,6 +165,17 @@ function M.set_allowed_params(provider_conf, request_body)
   -- If max_tokens is set in config, unset max_completion_tokens
   if request_body.max_tokens then request_body.max_completion_tokens = nil end
 
+  -- A provider can end up carrying BOTH the scalar `reasoning_effort` and the nested
+  -- `reasoning = { effort = ... }`: a provider that inherits `reasoning_effort` from the
+  -- `openai` base (via __inherited_from) but declares its own `reasoning` override gets
+  -- both deep-merged into the body. OpenRouter rejects that with a 400 ("reasoning_effort
+  -- and reasoning.effort are both provided with conflicting values"), and the Response API
+  -- conversion below would otherwise clobber the explicit nested object. The nested form
+  -- is the more specific intent, so keep it and drop the inherited scalar.
+  if request_body.reasoning ~= nil and request_body.reasoning_effort ~= nil then
+    request_body.reasoning_effort = nil
+  end
+
   -- Handle Response API specific parameters
   if use_response_api then
     -- Convert reasoning_effort to reasoning object for Response API
