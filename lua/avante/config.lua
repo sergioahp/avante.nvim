@@ -1095,13 +1095,17 @@ M._defaults = {
   --- (MORPH_API_KEY). When off (default) the selection edit uses the inline <code>
   --- replacement.
   --- @field diff_highlight_timeout_ms integer Duration for visual-selection edit highlights
-  --- after a successful visual-selection edit. 0 disables the highlight.
+  --- showing deleted virtual text and added buffer text together. 0 skips the
+  --- combined stage.
+  --- @field diff_highlight_added_timeout_ms integer Duration to keep only the
+  --- added-text highlight after the combined diff stage. 0 clears it immediately.
   selection = {
     enabled = true,
     hint_display = "delayed",
     edit_stream_flush_interval_ms = 33,
     fastapply = false,
     diff_highlight_timeout_ms = 100,
+    diff_highlight_added_timeout_ms = 500,
   },
   --- @class AvanteRepoMapConfig
   repo_map = {

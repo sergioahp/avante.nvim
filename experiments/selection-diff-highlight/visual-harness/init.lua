@@ -79,6 +79,16 @@ elseif phase == "after_highlight" then
   require("avante.selection_diff_highlight").show(buf, fixture.before, fixture.after, fixture.start_lnum, {
     timeout_ms = -1,
   })
+elseif phase == "combined" then
+  require("avante.selection_diff_highlight").show_transition(buf, fixture.before, fixture.after, fixture.start_lnum, {
+    transition_timeout_ms = -1,
+    added_timeout_ms = -1,
+  })
+elseif phase == "added" then
+  require("avante.selection_diff_highlight").show_transition(buf, fixture.before, fixture.after, fixture.start_lnum, {
+    transition_timeout_ms = 0,
+    added_timeout_ms = -1,
+  })
 elseif phase == "delete_flash" then
   require("avante.selection_diff_highlight").show_deletions(buf, fixture.before, fixture.after, fixture.start_lnum, {
     timeout_ms = -1,

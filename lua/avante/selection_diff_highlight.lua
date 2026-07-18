@@ -5,8 +5,17 @@ local Highlights = require("avante.highlights")
 
 local M = {}
 
+---@diagnostic disable-next-line: deprecated
+local text_diff = vim.text and vim.text.diff or vim.diff
+
 local NAMESPACE = api.nvim_create_namespace("avante-selection-diff-highlight")
+local DELETE_NAMESPACE = api.nvim_create_namespace("avante-selection-diff-delete")
 local PRIORITY = (vim.hl or vim.highlight).priorities.user
+local INLINE_MAX_GROUPS = 2
+local INLINE_MAX_EDIT_RATIO = 0.9
+
+---@type table<integer, integer>
+local generations = {}
 
 ---@class avante.SelectionDiffToken
 ---@field text string
@@ -27,6 +36,19 @@ end
 local function timeout_from_opts(opts)
   if opts and opts.timeout_ms ~= nil then return opts.timeout_ms end
   return Config.selection.diff_highlight_timeout_ms
+end
+
+---@param opts? { transition_timeout_ms?: integer, added_timeout_ms?: integer }
+---@return integer transition_timeout_ms
+---@return integer added_timeout_ms
+local function transition_timeouts_from_opts(opts)
+  local transition_timeout_ms = opts and opts.transition_timeout_ms
+  if transition_timeout_ms == nil then transition_timeout_ms = Config.selection.diff_highlight_timeout_ms or 100 end
+
+  local added_timeout_ms = opts and opts.added_timeout_ms
+  if added_timeout_ms == nil then added_timeout_ms = Config.selection.diff_highlight_added_timeout_ms or 500 end
+
+  return transition_timeout_ms, added_timeout_ms
 end
 
 ---@param lines string[]
@@ -126,17 +148,144 @@ local function tokens_to_diff_text(tokens)
   return table.concat(lines, "\n")
 end
 
+---@param namespace integer
 ---@param bufnr integer
 ---@param token avante.SelectionDiffToken
 ---@param hl_group string
-local function add_highlight(bufnr, token, hl_group)
-  api.nvim_buf_set_extmark(bufnr, NAMESPACE, token.row, token.start_col, {
+local function add_highlight(namespace, bufnr, token, hl_group)
+  api.nvim_buf_set_extmark(bufnr, namespace, token.row, token.start_col, {
     end_row = token.row,
     end_col = token.end_col,
     hl_group = hl_group,
     hl_mode = "combine",
     priority = PRIORITY,
   })
+end
+
+---@param tokens avante.SelectionDiffToken[]
+---@param start_idx integer
+---@param count integer
+---@return string
+local function concat_tokens(tokens, start_idx, count)
+  local parts = {}
+  for idx = start_idx, start_idx + count - 1 do
+    if tokens[idx] then parts[#parts + 1] = tokens[idx].text end
+  end
+  return table.concat(parts)
+end
+
+---@param old_line string
+---@param new_line string
+---@return { text: string, col: integer }[]
+---@return integer edit_count
+local function deleted_inline_groups(old_line, new_line)
+  local old_tokens = tokenize_bytes({ old_line }, 1)
+  if #old_tokens == 0 then return {}, 0 end
+
+  local new_tokens = tokenize_bytes({ new_line }, 1)
+  ---@diagnostic disable-next-line: assign-type-mismatch
+  local patch = text_diff( ---@type integer[][]
+    tokens_to_diff_text(old_tokens),
+    tokens_to_diff_text(new_tokens),
+    ---@diagnostic disable-next-line: missing-fields
+    { algorithm = "histogram", result_type = "indices", ctxlen = 0 }
+  )
+
+  local groups = {}
+  local edit_count = 0
+  for _, hunk in ipairs(patch or {}) do
+    local start_a, count_a, start_b, count_b = unpack(hunk)
+    edit_count = edit_count + count_a + count_b
+    if count_a > 0 then
+      local col = 0
+      if count_b > 0 and new_tokens[start_b] then
+        col = new_tokens[start_b].start_col
+      elseif start_b > 0 and new_tokens[start_b] then
+        col = new_tokens[start_b].end_col
+      end
+      groups[#groups + 1] = { text = concat_tokens(old_tokens, start_a, count_a), col = col }
+    end
+  end
+  return groups, edit_count
+end
+
+---@param groups table[]
+---@param edit_count integer
+---@param old_line string
+---@param new_line string
+---@return boolean
+local function inline_ok(groups, edit_count, old_line, new_line)
+  if #groups == 0 or #groups > INLINE_MAX_GROUPS then return false end
+  local length = math.max(vim.fn.strchars(old_line), vim.fn.strchars(new_line), 1)
+  return edit_count / length <= INLINE_MAX_EDIT_RATIO
+end
+
+---@param bufnr integer
+---@param row integer
+---@param line string
+local function add_deleted_virtual_line(bufnr, row, line)
+  api.nvim_buf_set_extmark(bufnr, DELETE_NAMESPACE, row, 0, {
+    virt_lines = { { { line == "" and " " or line, Highlights.SELECTION_DIFF_DELETE } } },
+    virt_lines_above = true,
+    priority = PRIORITY,
+  })
+end
+
+---@param bufnr integer
+---@param old_lines string[]
+---@param new_lines string[]
+---@param start_lnum integer
+local function show_deleted_virtual_text(bufnr, old_lines, new_lines, start_lnum)
+  ---@diagnostic disable-next-line: assign-type-mismatch
+  local hunks = text_diff( ---@type integer[][]
+    table.concat(old_lines, "\n") .. "\n",
+    table.concat(new_lines, "\n") .. "\n",
+    ---@diagnostic disable-next-line: missing-fields
+    { algorithm = "histogram", result_type = "indices", ctxlen = 0 }
+  )
+
+  for _, hunk in ipairs(hunks or {}) do
+    local start_a, count_a, start_b, count_b = unpack(hunk)
+    local available_old = math.max(#old_lines - start_a + 1, 0)
+    local available_new = math.max(#new_lines - start_b + 1, 0)
+    local paired_count = math.min(count_a, count_b, available_old, available_new)
+
+    for offset = 0, paired_count - 1 do
+      local row = start_lnum + start_b + offset - 2
+      local old_line = old_lines[start_a + offset]
+      local new_line = new_lines[start_b + offset]
+      local groups, edit_count = deleted_inline_groups(old_line, new_line)
+      if inline_ok(groups, edit_count, old_line, new_line) then
+        for _, group in ipairs(groups) do
+          if group.text ~= "" then
+            api.nvim_buf_set_extmark(bufnr, DELETE_NAMESPACE, row, group.col, {
+              virt_text = { { group.text, Highlights.SELECTION_DIFF_DELETE } },
+              virt_text_pos = "inline",
+              priority = PRIORITY,
+            })
+          end
+        end
+      else
+        add_deleted_virtual_line(bufnr, row, old_line)
+      end
+    end
+
+    if count_a > paired_count then
+      local virt_lines = {}
+      for idx = start_a + paired_count, start_a + count_a - 1 do
+        local line = old_lines[idx] or ""
+        virt_lines[#virt_lines + 1] = { { line == "" and " " or line, Highlights.SELECTION_DIFF_DELETE } }
+      end
+
+      local line_count = api.nvim_buf_line_count(bufnr)
+      local anchor_row = math.min(math.max(start_lnum + start_b + paired_count - 2, 0), line_count - 1)
+      api.nvim_buf_set_extmark(bufnr, DELETE_NAMESPACE, anchor_row, 0, {
+        virt_lines = virt_lines,
+        virt_lines_above = start_b + paired_count == 0,
+        priority = PRIORITY,
+      })
+    end
+  end
 end
 
 ---@param old_tokens avante.SelectionDiffToken[]
@@ -147,7 +296,7 @@ function M.changed_tokens(old_tokens, new_tokens)
   if #old_tokens == 0 then return new_tokens end
 
   ---@diagnostic disable-next-line: assign-type-mismatch
-  local patch = vim.diff( ---@type integer[][]
+  local patch = text_diff( ---@type integer[][]
     tokens_to_diff_text(old_tokens),
     tokens_to_diff_text(new_tokens),
     ---@diagnostic disable-next-line: missing-fields
@@ -193,7 +342,9 @@ end
 function M.clear(bufnr)
   bufnr = bufnr or 0
   if not api.nvim_buf_is_valid(bufnr) then return end
+  generations[bufnr] = (generations[bufnr] or 0) + 1
   api.nvim_buf_clear_namespace(bufnr, NAMESPACE, 0, -1)
+  api.nvim_buf_clear_namespace(bufnr, DELETE_NAMESPACE, 0, -1)
 end
 
 ---@param bufnr integer
@@ -212,10 +363,54 @@ function M.show(bufnr, old_lines, new_lines, start_lnum, opts)
 
   local changed = M.changed_tokens(tokenize(old_lines, 1), tokenize(new_lines, start_lnum))
   for _, token in ipairs(changed) do
-    add_highlight(bufnr, token, Highlights.SELECTION_DIFF)
+    add_highlight(NAMESPACE, bufnr, token, Highlights.SELECTION_DIFF)
   end
 
   if #changed > 0 and timeout_ms and timeout_ms > 0 then vim.defer_fn(function() M.clear(bufnr) end, timeout_ms) end
+end
+
+---Show an already-applied edit in two stages. The buffer stays in its after state:
+---deleted text is temporarily restored as red virtual text while inserted bytes are
+---green, then only the green insertion highlights remain.
+---@param bufnr integer
+---@param old_lines string[]
+---@param new_lines string[]
+---@param start_lnum integer 1-indexed
+---@param opts? { transition_timeout_ms?: integer, added_timeout_ms?: integer }
+function M.show_transition(bufnr, old_lines, new_lines, start_lnum, opts)
+  if not api.nvim_buf_is_valid(bufnr) then return end
+
+  local transition_timeout_ms, added_timeout_ms = transition_timeouts_from_opts(opts)
+  M.clear(bufnr)
+  if transition_timeout_ms == 0 and added_timeout_ms == 0 then return end
+  local generation = generations[bufnr]
+
+  local inserted = inserted_ranges(old_lines, new_lines, start_lnum)
+  for _, token in ipairs(inserted) do
+    add_highlight(NAMESPACE, bufnr, token, Highlights.SELECTION_DIFF)
+  end
+  if transition_timeout_ms ~= 0 then show_deleted_virtual_text(bufnr, old_lines, new_lines, start_lnum) end
+
+  local function clear_added_after_timeout()
+    if added_timeout_ms == 0 then
+      api.nvim_buf_clear_namespace(bufnr, NAMESPACE, 0, -1)
+    elseif added_timeout_ms > 0 then
+      vim.defer_fn(function()
+        if not api.nvim_buf_is_valid(bufnr) or generations[bufnr] ~= generation then return end
+        api.nvim_buf_clear_namespace(bufnr, NAMESPACE, 0, -1)
+      end, added_timeout_ms)
+    end
+  end
+
+  if transition_timeout_ms > 0 then
+    vim.defer_fn(function()
+      if not api.nvim_buf_is_valid(bufnr) or generations[bufnr] ~= generation then return end
+      api.nvim_buf_clear_namespace(bufnr, DELETE_NAMESPACE, 0, -1)
+      clear_added_after_timeout()
+    end, transition_timeout_ms)
+  elseif transition_timeout_ms == 0 then
+    clear_added_after_timeout()
+  end
 end
 
 ---@param bufnr integer
@@ -235,7 +430,7 @@ function M.show_deletions(bufnr, old_lines, new_lines, start_lnum, opts)
 
   M.clear(bufnr)
   for _, token in ipairs(deleted) do
-    add_highlight(bufnr, token, Highlights.SELECTION_DIFF_DELETE)
+    add_highlight(DELETE_NAMESPACE, bufnr, token, Highlights.SELECTION_DIFF_DELETE)
   end
 
   if timeout_ms > 0 then vim.defer_fn(function() M.clear(bufnr) end, timeout_ms) end
@@ -261,7 +456,7 @@ function M.flash_deletions_before(bufnr, old_lines, new_lines, start_lnum, callb
 
   M.clear(bufnr)
   for _, token in ipairs(deleted) do
-    add_highlight(bufnr, token, Highlights.SELECTION_DIFF_DELETE)
+    add_highlight(DELETE_NAMESPACE, bufnr, token, Highlights.SELECTION_DIFF_DELETE)
   end
 
   vim.defer_fn(function()
@@ -275,5 +470,6 @@ end
 M._tokenize = tokenize
 M._tokenize_bytes = tokenize_bytes
 M._namespace = NAMESPACE
+M._delete_namespace = DELETE_NAMESPACE
 
 return M

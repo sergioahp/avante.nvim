@@ -63,8 +63,8 @@ EOF
 
 render_phase "before" "01" "before edit"
 render_phase "selected" "02" "selection submitted"
-render_phase "delete_flash" "03" "deleted tokens flash before edit"
-render_phase "after_highlight" "04" "successful edit, changed tokens highlighted"
+render_phase "combined" "03" "after state + virtual before diff"
+render_phase "added" "04" "virtual text cleared; additions remain"
 render_phase "after_cleared" "05" "highlight timeout elapsed"
 
 echo "$SEQ_DIR"

@@ -2,10 +2,10 @@ local SelectionDiffHighlight = require("avante.selection_diff_highlight")
 local Config = require("avante.config")
 
 describe("selection diff highlight", function()
-  it(
-    "defaults to a short flash",
-    function() assert.equals(100, Config._defaults.selection.diff_highlight_timeout_ms) end
-  )
+  it("defaults to a short flash", function()
+    assert.equals(100, Config._defaults.selection.diff_highlight_timeout_ms)
+    assert.equals(500, Config._defaults.selection.diff_highlight_added_timeout_ms)
+  end)
 
   it("returns only changed replacement tokens", function()
     local old_tokens = SelectionDiffHighlight._tokenize({ "local result = old_value + keep" }, 1)
@@ -55,7 +55,8 @@ describe("selection diff highlight", function()
 
     local count = SelectionDiffHighlight.show_deletions(bufnr, { old_line }, { new_line }, 1, { timeout_ms = -1 })
 
-    local marks = vim.api.nvim_buf_get_extmarks(bufnr, SelectionDiffHighlight._namespace, 0, -1, { details = true })
+    local marks =
+      vim.api.nvim_buf_get_extmarks(bufnr, SelectionDiffHighlight._delete_namespace, 0, -1, { details = true })
     local ranges = vim.tbl_map(function(mark)
       local details = mark[4]
       return old_line:sub(mark[3] + 1, details.end_col)
@@ -78,27 +79,97 @@ describe("selection diff highlight", function()
     assert.equals(0, #marks)
   end)
 
-  it("delays replacement while deletion flash is visible", function()
+  it("shows small replacements inline over the already-applied buffer", function()
     local bufnr = vim.api.nvim_create_buf(false, true)
-    local old_line = "bold(c)_1"
-    local new_line = "c_1"
-    local applied = false
-    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { old_line })
+    local old_line = "local result = old_value + keep"
+    local new_line = "local result = new_value + keep"
+    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { new_line })
 
-    local delayed = SelectionDiffHighlight.flash_deletions_before(bufnr, { old_line }, { new_line }, 1, function()
-      applied = true
-      vim.api.nvim_buf_set_lines(bufnr, 0, 1, false, { new_line })
-    end, { timeout_ms = 20 })
+    SelectionDiffHighlight.show_transition(bufnr, { old_line }, { new_line }, 1, {
+      transition_timeout_ms = -1,
+      added_timeout_ms = -1,
+    })
 
-    assert.is_true(delayed)
-    assert.is_false(applied)
-    assert.are.same({ old_line }, vim.api.nvim_buf_get_lines(bufnr, 0, -1, false))
-
-    vim.wait(200, function() return applied end, 5)
-
-    assert.is_true(applied)
     assert.are.same({ new_line }, vim.api.nvim_buf_get_lines(bufnr, 0, -1, false))
-    local marks = vim.api.nvim_buf_get_extmarks(bufnr, SelectionDiffHighlight._namespace, 0, -1, { details = true })
-    assert.equals(0, #marks)
+
+    local added = vim.api.nvim_buf_get_extmarks(bufnr, SelectionDiffHighlight._namespace, 0, -1, { details = true })
+    local deleted =
+      vim.api.nvim_buf_get_extmarks(bufnr, SelectionDiffHighlight._delete_namespace, 0, -1, { details = true })
+    assert.equals(1, #added)
+    assert.equals("new", new_line:sub(added[1][3] + 1, added[1][4].end_col))
+    assert.equals(1, #deleted)
+    assert.are.same({ { "old", "AvanteSelectionDiffDelete" } }, deleted[1][4].virt_text)
+    assert.equals("inline", deleted[1][4].virt_text_pos)
+  end)
+
+  it("uses a virtual before line for a heavy replacement", function()
+    local bufnr = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { "omega" })
+
+    SelectionDiffHighlight.show_transition(bufnr, { "alpha" }, { "omega" }, 1, {
+      transition_timeout_ms = -1,
+      added_timeout_ms = -1,
+    })
+
+    local deleted =
+      vim.api.nvim_buf_get_extmarks(bufnr, SelectionDiffHighlight._delete_namespace, 0, -1, { details = true })
+    assert.equals(1, #deleted)
+    assert.are.same({ { { "alpha", "AvanteSelectionDiffDelete" } } }, deleted[1][4].virt_lines)
+    assert.is_true(deleted[1][4].virt_lines_above)
+  end)
+
+  it("keeps a pure deletion visible as a virtual line over the final buffer", function()
+    local bufnr = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { "after" })
+
+    SelectionDiffHighlight.show_transition(bufnr, { "remove me" }, {}, 1, {
+      transition_timeout_ms = -1,
+      added_timeout_ms = -1,
+    })
+
+    assert.are.same({ "after" }, vim.api.nvim_buf_get_lines(bufnr, 0, -1, false))
+    assert.equals(0, #vim.api.nvim_buf_get_extmarks(bufnr, SelectionDiffHighlight._namespace, 0, -1, {}))
+    local deleted =
+      vim.api.nvim_buf_get_extmarks(bufnr, SelectionDiffHighlight._delete_namespace, 0, -1, { details = true })
+    assert.equals(1, #deleted)
+    assert.are.same({ { { "remove me", "AvanteSelectionDiffDelete" } } }, deleted[1][4].virt_lines)
+  end)
+
+  it("clears virtual deletions before the added highlight", function()
+    local bufnr = vim.api.nvim_create_buf(false, true)
+    local old_line = "local value = old_name"
+    local new_line = "local value = new_name"
+    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { new_line })
+
+    SelectionDiffHighlight.show_transition(bufnr, { old_line }, { new_line }, 1, {
+      transition_timeout_ms = 20,
+      added_timeout_ms = 40,
+    })
+
+    assert.equals(
+      1,
+      #vim.api.nvim_buf_get_extmarks(bufnr, SelectionDiffHighlight._delete_namespace, 0, -1, { details = true })
+    )
+    assert.equals(1, #vim.api.nvim_buf_get_extmarks(bufnr, SelectionDiffHighlight._namespace, 0, -1, {}))
+
+    assert.is_true(
+      vim.wait(
+        200,
+        function()
+          return #vim.api.nvim_buf_get_extmarks(bufnr, SelectionDiffHighlight._delete_namespace, 0, -1, {}) == 0
+        end,
+        5
+      )
+    )
+    assert.equals(1, #vim.api.nvim_buf_get_extmarks(bufnr, SelectionDiffHighlight._namespace, 0, -1, {}))
+
+    assert.is_true(
+      vim.wait(
+        200,
+        function() return #vim.api.nvim_buf_get_extmarks(bufnr, SelectionDiffHighlight._namespace, 0, -1, {}) == 0 end,
+        5
+      )
+    )
+    assert.are.same({ new_line }, vim.api.nvim_buf_get_lines(bufnr, 0, -1, false))
   end)
 end)

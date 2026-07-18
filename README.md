@@ -580,6 +580,8 @@ If both are used, options passed to `setup()` override values from `vim.g.avante
   selection = {
     enabled = true,
     hint_display = "delayed",
+    diff_highlight_timeout_ms = 100, -- show old virtual text and new text together
+    diff_highlight_added_timeout_ms = 500, -- then keep only added text highlighted
   },
   windows = {
     ---@type "right" | "left" | "top" | "bottom"

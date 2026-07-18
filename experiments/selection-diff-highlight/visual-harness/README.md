@@ -18,4 +18,5 @@ out/word_swap_2026-06-20_15-30-42.tmux.png
 
 Fixtures live in `fixtures.lua`. Each fixture provides `before`, `after`, and a
 1-indexed `start_lnum`, so the harness can place extmarks on the final buffer at
-the same rows a real selection edit would occupy.
+the same rows a real selection edit would occupy. `shot_sequence.sh` captures the
+instant combined stage, the added-only stage, and the cleared final state.
