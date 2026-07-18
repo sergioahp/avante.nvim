@@ -8,6 +8,7 @@ local SelectionResult = require("avante.selection_result")
 local SelectionDiffHighlight = require("avante.selection_diff_highlight")
 local Range = require("avante.range")
 local Morph = require("avante.morph")
+local EditTrace = require("avante.edit_trace")
 
 local api = vim.api
 local fn = vim.fn
@@ -323,10 +324,21 @@ function Selection:submit_input(input)
   local morph_start_lnum = self.selection.range.start.lnum
   local morph_finish_lnum = self.selection.range.finish.lnum
   if use_morph then
-    morph_code_lines, morph_start_lnum, morph_finish_lnum =
+    local crop_source_start, crop_source_finish
+    morph_code_lines, morph_start_lnum, morph_finish_lnum, crop_source_start, crop_source_finish =
       Morph.crop_around_selection(code_lines, self.selection.range.start.lnum, self.selection.range.finish.lnum)
     morph_code_content = table.concat(morph_code_lines, "\n")
     prompt_code_content = morph_code_content
+    EditTrace.begin({
+      input = input,
+      path = self.selection.filepath,
+      filetype = filetype,
+      sel_start = self.selection.range.start.lnum,
+      sel_finish = self.selection.range.finish.lnum,
+      crop_start = crop_source_start,
+      crop_finish = crop_source_finish,
+    })
+    EditTrace.add("context", { crop = morph_code_content })
   end
 
   -- The non-fast-apply path returns the full <code> region inline, so we forbid tool
@@ -381,17 +393,21 @@ function Selection:submit_input(input)
   local function morph_apply_and_confine(code_edit, morph_instruction, on_done)
     Morph.apply(morph_code_content, code_edit, morph_instruction, function(merged, err)
       if err or merged == nil then
+        EditTrace.add("morph", { err = err or "unknown error" })
+        EditTrace.add("final", { status = "failed", note = "Morph apply failed" })
         flusher.done = true
         if self.prompt_input then self.prompt_input:stop_spinner() end
         Utils.error("Morph apply failed: " .. (err or "unknown error"), { once = true, title = "Avante" })
         on_done("failed")
         return
       end
+      EditTrace.add("morph", { merged = merged })
       local merged_lines = vim.split(merged, "\n")
       if #merged_lines > 1 and merged_lines[#merged_lines] == "" then table.remove(merged_lines) end
       -- Client-side guard: make sure Morph only touched the selected region.
       local region, verr, detail =
         Morph.scoped_region_change(morph_code_lines, merged_lines, morph_start_lnum, morph_finish_lnum)
+      EditTrace.add("guard", { ok = region ~= nil, verr = verr, detail = detail })
       if region == nil then
         on_done("rejected", verr, detail)
         return
@@ -400,6 +416,7 @@ function Selection:submit_input(input)
       flusher.done = true
       if self.prompt_input then self.prompt_input:stop_spinner() end
       apply_confined_region(region)
+      EditTrace.add("final", { status = "applied" })
       on_done("applied")
     end)
   end
@@ -478,10 +495,20 @@ function Selection:submit_input(input)
       if draft.applied then return nil, Helpers.CANCEL_TOKEN end
       draft.attempts = draft.attempts + 1
       local code_edit = tool_input.code_edit
+      EditTrace.add("draft", {
+        attempt = draft.attempts,
+        path = tool_input.path,
+        instructions = tool_input.instructions,
+        code_edit = code_edit,
+      })
       if code_edit == nil or code_edit == "" then
         if draft.attempts >= MAX_DRAFT_ATTEMPTS then
           flusher.done = true
           if self.prompt_input then self.prompt_input:stop_spinner() end
+          EditTrace.add(
+            "final",
+            { status = "gave up", note = "no usable draft after " .. draft.attempts .. " attempts" }
+          )
           Utils.error(
             ("Selection edit: no usable draft after %d attempts. The buffer was left unchanged."):format(
               draft.attempts
@@ -512,11 +539,17 @@ function Selection:submit_input(input)
             )
             -- An error tool result keeps the agent loop going: it re-prompts the
             -- drafting model with this feedback and the tool call history.
-            tool_opts.on_complete(nil, reject_feedback(verr, detail))
+            local feedback = reject_feedback(verr, detail)
+            EditTrace.add("feedback", { text = feedback })
+            tool_opts.on_complete(nil, feedback)
             return
           end
           flusher.done = true
           if self.prompt_input then self.prompt_input:stop_spinner() end
+          EditTrace.add(
+            "final",
+            { status = "gave up", note = ("rejected %d times — %s"):format(draft.attempts, verr) }
+          )
           Utils.error(
             ("Selection edit: giving up after %d attempts — %s. The buffer was left unchanged."):format(
               draft.attempts,
@@ -580,15 +613,18 @@ function Selection:submit_input(input)
     -- draft. No tool round-trip exists here, so a rejection is final.
     local code_edit = flusher.full_response
     if code_edit == nil or code_edit == "" then
+      EditTrace.add("final", { status = "failed", note = "the model did not produce an edit" })
       if self.prompt_input then self.prompt_input:stop_spinner() end
       Utils.error("The model did not produce an edit", { once = true, title = "Avante" })
       return
     end
+    EditTrace.add("draft_text", { text = code_edit })
     morph_apply_and_confine(
       code_edit,
       "Apply the update to the selected region only, leaving the rest of the file unchanged.",
       function(status, verr)
         if status == "rejected" then
+          EditTrace.add("final", { status = "rejected", note = verr })
           if self.prompt_input then self.prompt_input:stop_spinner() end
           Utils.error(
             "Morph edit rejected: " .. verr .. ". The buffer was left unchanged.",

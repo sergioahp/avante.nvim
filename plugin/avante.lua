@@ -188,6 +188,11 @@ end, {
   complete = function(_, _, _) return { "history", "cache" } end,
 })
 cmd("ShowRepoMap", function() require("avante.repo_map").show() end, { desc = "avante: show repo map" })
+cmd(
+  "InspectEdit",
+  function() require("avante.edit_trace").show() end,
+  { desc = "avante: inspect the last ephemeral selection edit" }
+)
 cmd("Models", function() require("avante.model_selector").open() end, { desc = "avante: show models" })
 cmd("ACPModels", function() require("avante.api").select_acp_model() end, { desc = "avante: switch ACP model" })
 cmd("ACPModes", function() require("avante.api").select_acp_mode() end, { desc = "avante: switch ACP mode" })
