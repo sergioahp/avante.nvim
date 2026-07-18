@@ -7,6 +7,38 @@ local Utils = require("avante.utils")
 ---@class avante.Morph
 local M = {}
 
+local MIN_SELECTION_CONTEXT_LINES = 6
+
+---Crop a buffer around a selected range for both the drafting and apply models.
+---Small selections retain at least six lines on each side; once a selection is
+---larger than that, each side grows linearly with the selection. Keeping the
+---apply model away from distant code prevents unrelated normalization while the
+---local context remains large enough to carry enclosing-block anchors.
+---@param lines string[] original whole-buffer lines
+---@param start_lnum integer 1-indexed first line of the selection
+---@param finish_lnum integer 1-indexed last line of the selection
+---@return string[] cropped_lines
+---@return integer cropped_start_lnum selection start relative to cropped_lines
+---@return integer cropped_finish_lnum selection finish relative to cropped_lines
+---@return integer source_start_lnum first whole-buffer line included in the crop
+---@return integer source_finish_lnum last whole-buffer line included in the crop
+function M.crop_around_selection(lines, start_lnum, finish_lnum)
+  if start_lnum < 1 or finish_lnum < start_lnum or finish_lnum > #lines then error("selection range out of bounds") end
+  local selected_line_count = finish_lnum - start_lnum + 1
+  local context_line_count = math.max(MIN_SELECTION_CONTEXT_LINES, selected_line_count)
+  local source_start_lnum = math.max(1, start_lnum - context_line_count)
+  local source_finish_lnum = math.min(#lines, finish_lnum + context_line_count)
+  local cropped_lines = {}
+  for lnum = source_start_lnum, source_finish_lnum do
+    cropped_lines[#cropped_lines + 1] = lines[lnum]
+  end
+  return cropped_lines,
+    start_lnum - source_start_lnum + 1,
+    finish_lnum - source_start_lnum + 1,
+    source_start_lnum,
+    source_finish_lnum
+end
+
 ---Merge `update` into `original_code` via the Morph apply model.
 ---Calls `on_complete(merged, nil)` on success, `on_complete(nil, err)` on failure.
 ---@param original_code string

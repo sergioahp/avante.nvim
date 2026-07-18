@@ -1,5 +1,58 @@
 local Morph = require("avante.morph")
 
+describe("morph.crop_around_selection", function()
+  local function numbered_lines(count)
+    local lines = {}
+    for i = 1, count do
+      lines[i] = "line " .. i
+    end
+    return lines
+  end
+
+  it("keeps six context lines on each side of a small selection", function()
+    local cropped, start_lnum, finish_lnum, source_start, source_finish =
+      Morph.crop_around_selection(numbered_lines(30), 15, 15)
+    assert.are.same(9, source_start)
+    assert.are.same(21, source_finish)
+    assert.are.same(7, start_lnum)
+    assert.are.same(7, finish_lnum)
+    assert.are.same(13, #cropped)
+    assert.are.same("line 15", cropped[start_lnum])
+  end)
+
+  it("grows each side in proportion to a larger selection", function()
+    local cropped, start_lnum, finish_lnum, source_start, source_finish =
+      Morph.crop_around_selection(numbered_lines(60), 20, 29)
+    assert.are.same(10, source_start)
+    assert.are.same(39, source_finish)
+    assert.are.same(11, start_lnum)
+    assert.are.same(20, finish_lnum)
+    assert.are.same(30, #cropped)
+    assert.are.same("line 20", cropped[start_lnum])
+    assert.are.same("line 29", cropped[finish_lnum])
+  end)
+
+  it("clamps context at the start of the file", function()
+    local cropped, start_lnum, finish_lnum, source_start, source_finish =
+      Morph.crop_around_selection(numbered_lines(30), 1, 2)
+    assert.are.same(1, source_start)
+    assert.are.same(8, source_finish)
+    assert.are.same(1, start_lnum)
+    assert.are.same(2, finish_lnum)
+    assert.are.same(8, #cropped)
+  end)
+
+  it("clamps context at the end of the file", function()
+    local cropped, start_lnum, finish_lnum, source_start, source_finish =
+      Morph.crop_around_selection(numbered_lines(30), 29, 30)
+    assert.are.same(23, source_start)
+    assert.are.same(30, source_finish)
+    assert.are.same(7, start_lnum)
+    assert.are.same(8, finish_lnum)
+    assert.are.same(8, #cropped)
+  end)
+end)
+
 describe("morph.scoped_region_change", function()
   it("returns the replacement lines for a mid-file edit (markers both sides)", function()
     local orig = { "a", "b", "c", "d", "e" }

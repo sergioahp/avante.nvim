@@ -307,14 +307,27 @@ function Selection:submit_input(input)
 
   -- Fast-apply path: the configured (fast) provider drafts the edit by CALLING the
   -- edit_file tool (Morph's documented draft format: path/instructions/code_edit with
-  -- `// ... existing code ...` markers). The tool itself runs the Morph merge (whole
-  -- file as context plus the model's first-person instruction) and confines the result
-  -- back to the selected region client-side. A merge that strays outside the selection
-  -- is returned to the drafting model as the tool result, so it gets a few attempts to
+  -- `// ... existing code ...` markers). Both the drafting model and Morph see a
+  -- proportional crop around the selection: enough local context for anchors without
+  -- exposing distant code that Morph might normalize. The merge is confined back to
+  -- the selected region client-side. A merge that strays outside the selection is
+  -- returned to the drafting model as the tool result, so it gets a few attempts to
   -- fix its draft; success (or giving up) ends the turn via CANCEL_TOKEN. Falls back to
   -- the inline <code> replacement when Morph isn't configured.
   local morph_provider = Provider["morph"]
   local use_morph = Config.selection.fastapply and morph_provider ~= nil and morph_provider.is_env_set()
+
+  local prompt_code_content = code_content
+  local morph_code_lines = code_lines
+  local morph_code_content = code_content
+  local morph_start_lnum = self.selection.range.start.lnum
+  local morph_finish_lnum = self.selection.range.finish.lnum
+  if use_morph then
+    morph_code_lines, morph_start_lnum, morph_finish_lnum =
+      Morph.crop_around_selection(code_lines, self.selection.range.start.lnum, self.selection.range.finish.lnum)
+    morph_code_content = table.concat(morph_code_lines, "\n")
+    prompt_code_content = morph_code_content
+  end
 
   -- The non-fast-apply path returns the full <code> region inline, so we forbid tool
   -- calls there. The fast-apply path needs the edit_file tool, so leave tools enabled.
@@ -366,7 +379,7 @@ function Selection:submit_input(input)
   -- caller can decide between another model attempt and giving up.
   ---@param on_done fun(status: "applied"|"failed"|"rejected", verr?: string, detail?: AvanteMorphRejectDetail)
   local function morph_apply_and_confine(code_edit, morph_instruction, on_done)
-    Morph.apply(code_content, code_edit, morph_instruction, function(merged, err)
+    Morph.apply(morph_code_content, code_edit, morph_instruction, function(merged, err)
       if err or merged == nil then
         flusher.done = true
         if self.prompt_input then self.prompt_input:stop_spinner() end
@@ -377,12 +390,8 @@ function Selection:submit_input(input)
       local merged_lines = vim.split(merged, "\n")
       if #merged_lines > 1 and merged_lines[#merged_lines] == "" then table.remove(merged_lines) end
       -- Client-side guard: make sure Morph only touched the selected region.
-      local region, verr, detail = Morph.scoped_region_change(
-        code_lines,
-        merged_lines,
-        self.selection.range.start.lnum,
-        self.selection.range.finish.lnum
-      )
+      local region, verr, detail =
+        Morph.scoped_region_change(morph_code_lines, merged_lines, morph_start_lnum, morph_finish_lnum)
       if region == nil then
         on_done("rejected", verr, detail)
         return
@@ -594,7 +603,7 @@ function Selection:submit_input(input)
     ask = true,
     project_context = vim.json.encode(project_context),
     diagnostics = vim.json.encode(diagnostics),
-    selected_files = { { content = code_content, file_type = filetype, path = "" } },
+    selected_files = { { content = prompt_code_content, file_type = filetype, path = "" } },
     code_lang = filetype,
     selected_code = selected_code,
     instructions = instructions,
