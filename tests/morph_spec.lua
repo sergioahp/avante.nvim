@@ -53,6 +53,59 @@ describe("morph.crop_around_selection", function()
   end)
 end)
 
+describe("morph.window_around_selection", function()
+  local function numbered_lines(count)
+    local lines = {}
+    for i = 1, count do
+      lines[i] = "line " .. i
+    end
+    return lines
+  end
+
+  it("keeps three context lines on each side", function()
+    local ws, wf = Morph.window_around_selection(numbered_lines(30), 10, 12)
+    assert.are.same(7, ws)
+    assert.are.same(15, wf)
+  end)
+
+  it("clamps at the buffer edges", function()
+    local ws, wf = Morph.window_around_selection(numbered_lines(10), 1, 9)
+    assert.are.same(1, ws)
+    assert.are.same(10, wf)
+  end)
+end)
+
+describe("morph.fuzzy_align_region", function()
+  it("returns the region unchanged when the context is copied exactly", function()
+    local orig = { "a", "b", "SEL", "c", "d" }
+    local model = { "a", "b", "NEW1", "NEW2", "c", "d" }
+    assert.are.same({ "NEW1", "NEW2" }, Morph.fuzzy_align_region(orig, model, 2, 2))
+  end)
+
+  it("discards context lines the model dropped (blank-line drift)", function()
+    local orig = { "x = 1", "", "", "SEL", "", "y = 2" }
+    -- model collapsed the double blank line before the selection and dropped the
+    -- blank after it
+    local model = { "x = 1", "", "NEW", "y = 2" }
+    assert.are.same({ "NEW" }, Morph.fuzzy_align_region(orig, model, 3, 2))
+  end)
+
+  it("tolerates whitespace-only drift in context lines", function()
+    local orig = { "  before", "SEL", "  after" }
+    local model = { "before", "CHANGED", "after  " }
+    assert.are.same({ "CHANGED" }, Morph.fuzzy_align_region(orig, model, 1, 1))
+  end)
+
+  it("keeps a grown region between duplicate-looking context lines", function()
+    local orig = { "}", "", "POOL = {", "  timeout = 30,", "}", "" }
+    local model = { "}", "", "POOL = {", "  timeout = 90,", "  retries = 3,", "}" }
+    assert.are.same(
+      { "POOL = {", "  timeout = 90,", "  retries = 3,", "}" },
+      Morph.fuzzy_align_region(orig, model, 2, 1)
+    )
+  end)
+end)
+
 describe("morph.scoped_region_change", function()
   it("returns the replacement lines for a mid-file edit (markers both sides)", function()
     local orig = { "a", "b", "c", "d", "e" }

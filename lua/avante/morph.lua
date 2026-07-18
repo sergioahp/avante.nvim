@@ -9,6 +9,16 @@ local M = {}
 
 local MIN_SELECTION_CONTEXT_LINES = 6
 
+---Selections up to this many lines take the regen-window drafting path: the
+---client picks a small window around the selection and the model regenerates
+---the whole window, instead of drafting a landmark sketch whose size is the
+---model's choice. Benched (reports/regen-window-selection-edit_2026-07-18.md):
+---small ambiguous selections are exactly where landmark drafts go wrong, and
+---regenerating a client-sized window was the only 100% cell.
+M.REGEN_MAX_SELECTION_LINES = 12
+
+local WINDOW_CONTEXT_LINES = 3
+
 ---Crop a buffer around a selected range for both the drafting and apply models.
 ---Small selections retain at least six lines on each side; once a selection is
 ---larger than that, each side grows linearly with the selection. Keeping the
@@ -37,6 +47,58 @@ function M.crop_around_selection(lines, start_lnum, finish_lnum)
     finish_lnum - source_start_lnum + 1,
     source_start_lnum,
     source_finish_lnum
+end
+
+---The edit window for the regen drafting path: the selection plus a few lines
+---of context on each side, always whole lines. Deliberately NOT snapped to
+---syntactic regions: wider, node-aligned windows measurably hurt (they reach
+---into comment runs and hand Morph more duplicate anchors).
+---@param lines string[] original whole-buffer lines
+---@param start_lnum integer 1-indexed first line of the selection
+---@param finish_lnum integer 1-indexed last line of the selection
+---@return integer window_start_lnum
+---@return integer window_finish_lnum
+function M.window_around_selection(lines, start_lnum, finish_lnum)
+  if start_lnum < 1 or finish_lnum < start_lnum or finish_lnum > #lines then error("selection range out of bounds") end
+  return math.max(1, start_lnum - WINDOW_CONTEXT_LINES), math.min(#lines, finish_lnum + WINDOW_CONTEXT_LINES)
+end
+
+---Align model output against the original context lines around a selection and
+---return only the lines that belong to the selection region, discarding the
+---model's version of the context. The greedy strip-level match tolerates the
+---drift weak models produce when asked to copy code byte-for-byte (dropped
+---blank lines, whitespace changes). Callers restore the original context
+---around the returned region.
+---@param orig_lines string[] the span the model was asked to reproduce
+---@param model_lines string[] what the model (or Morph) actually produced
+---@param n_before integer context lines before the selection in orig_lines
+---@param n_after integer context lines after the selection in orig_lines
+---@return string[] region_lines the model's selection region
+function M.fuzzy_align_region(orig_lines, model_lines, n_before, n_after)
+  local function stripped(s) return s:gsub("^%s+", ""):gsub("%s+$", "") end
+  local i, j = 1, 1
+  while i <= n_before and j <= #model_lines do
+    if stripped(orig_lines[i]) == stripped(model_lines[j]) then
+      i = i + 1
+      j = j + 1
+    else
+      i = i + 1 -- context line the model dropped or rewrote: discard it
+    end
+  end
+  local k, m = 0, 0 -- counted from the end
+  while k < n_after and m < #model_lines - j + 1 do
+    if stripped(orig_lines[#orig_lines - k]) == stripped(model_lines[#model_lines - m]) then
+      k = k + 1
+      m = m + 1
+    else
+      k = k + 1
+    end
+  end
+  local region = {}
+  for idx = j, #model_lines - m do
+    region[#region + 1] = model_lines[idx]
+  end
+  return region
 end
 
 ---Merge `update` into `original_code` via the Morph apply model.

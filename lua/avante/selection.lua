@@ -306,25 +306,39 @@ function Selection:submit_input(input)
     }
   end
 
-  -- Fast-apply path: the configured (fast) provider drafts the edit by CALLING the
-  -- edit_file tool (Morph's documented draft format: path/instructions/code_edit with
-  -- `// ... existing code ...` markers). Both the drafting model and Morph see a
-  -- proportional crop around the selection: enough local context for anchors without
-  -- exposing distant code that Morph might normalize. The merge is confined back to
-  -- the selected region client-side. A merge that strays outside the selection is
-  -- returned to the drafting model as the tool result, so it gets a few attempts to
-  -- fix its draft; success (or giving up) ends the turn via CANCEL_TOKEN. Falls back to
-  -- the inline <code> replacement when Morph isn't configured.
+  -- Fast-apply path: the configured (fast) provider drafts the edit and Morph merges
+  -- it into a proportional crop around the selection; the merge is confined back to
+  -- the selected region client-side. Two drafting protocols
+  -- (reports/regen-window-selection-edit_2026-07-18.md):
+  --
+  -- - Small selections (regen): the client picks an edit window (selection plus a few
+  --   lines each side), marks the selection with <selection> tags, and the model
+  --   regenerates the WHOLE window via the rewrite_window tool. The client wraps the
+  --   window in `... existing code ...` landmarks itself, so the drafted span is never
+  --   the model's choice -- tiny ambiguous update blocks were the dominant failure and
+  --   "output more lines" instructions get ignored.
+  -- - Larger selections (landmark): the model drafts an edit_file tool call (Morph's
+  --   documented path/instructions/code_edit sketch format with landmark comments).
+  --
+  -- A merge that strays outside the selection is returned to the drafting model as the
+  -- tool result, so it gets a few attempts to fix its draft; on the regen path a fuzzy
+  -- rescue first tries to salvage the merge by discarding out-of-region drift. Success
+  -- (or giving up) ends the turn via CANCEL_TOKEN. Falls back to the inline <code>
+  -- replacement when Morph isn't configured.
   local morph_provider = Provider["morph"]
   local use_morph = Config.selection.fastapply and morph_provider ~= nil and morph_provider.is_env_set()
+  local selection_line_count = self.selection.range.finish.lnum - self.selection.range.start.lnum + 1
+  local use_regen = use_morph and selection_line_count <= Morph.REGEN_MAX_SELECTION_LINES
 
   local prompt_code_content = code_content
   local morph_code_lines = code_lines
   local morph_code_content = code_content
   local morph_start_lnum = self.selection.range.start.lnum
   local morph_finish_lnum = self.selection.range.finish.lnum
+  local crop_source_start = 1
+  local crop_source_finish = #code_lines
+  local window_start, window_finish
   if use_morph then
-    local crop_source_start, crop_source_finish
     morph_code_lines, morph_start_lnum, morph_finish_lnum, crop_source_start, crop_source_finish =
       Morph.crop_around_selection(code_lines, self.selection.range.start.lnum, self.selection.range.finish.lnum)
     morph_code_content = table.concat(morph_code_lines, "\n")
@@ -333,6 +347,7 @@ function Selection:submit_input(input)
       input = input,
       path = self.selection.filepath,
       filetype = filetype,
+      protocol = use_regen and "regen" or "landmark",
       sel_start = self.selection.range.start.lnum,
       sel_finish = self.selection.range.finish.lnum,
       crop_start = crop_source_start,
@@ -341,9 +356,62 @@ function Selection:submit_input(input)
     EditTrace.add("context", { crop = morph_code_content })
   end
 
+  -- The marked edit window for the regen protocol, and the landmark line used to
+  -- wrap the regenerated window into a Morph update client-side.
+  local marked_window
+  local landmark_line = "// ... existing code ..."
+  if use_regen then
+    window_start, window_finish =
+      Morph.window_around_selection(code_lines, self.selection.range.start.lnum, self.selection.range.finish.lnum)
+    local commentstring = vim.bo[self.code_bufnr].commentstring
+    if commentstring and commentstring:find("%%s") then
+      landmark_line = vim.trim(commentstring:format("... existing code ..."))
+    end
+    local marked = {}
+    for lnum = window_start, self.selection.range.start.lnum - 1 do
+      marked[#marked + 1] = code_lines[lnum]
+    end
+    marked[#marked + 1] = "<selection>"
+    for lnum = self.selection.range.start.lnum, self.selection.range.finish.lnum do
+      marked[#marked + 1] = code_lines[lnum]
+    end
+    marked[#marked + 1] = "</selection>"
+    for lnum = self.selection.range.finish.lnum + 1, window_finish do
+      marked[#marked + 1] = code_lines[lnum]
+    end
+    marked_window = table.concat(marked, "\n")
+    EditTrace.add("window", { window = marked_window })
+  end
+
+  ---Turn a regenerated window into a Morph update: drop any echoed marker lines
+  ---and wrap in landmarks for the crop context the window doesn't cover.
+  ---@param code string the model's rewrite_window output
+  ---@return string update
+  local function window_to_update(code)
+    local window_lines = {}
+    for _, line in ipairs(vim.split(code, "\n")) do
+      local trimmed = vim.trim(line)
+      if trimmed ~= "<selection>" and trimmed ~= "</selection>" then window_lines[#window_lines + 1] = line end
+    end
+    if #window_lines > 1 and window_lines[#window_lines] == "" then table.remove(window_lines) end
+    local update = {}
+    if window_start > crop_source_start then update[#update + 1] = landmark_line end
+    vim.list_extend(update, window_lines)
+    if window_finish < crop_source_finish then update[#update + 1] = landmark_line end
+    return table.concat(update, "\n")
+  end
+
   -- The non-fast-apply path returns the full <code> region inline, so we forbid tool
-  -- calls there. The fast-apply path needs the edit_file tool, so leave tools enabled.
-  local instructions = use_morph and input or ("Do not call any tools and just response the request: " .. input)
+  -- calls there. The fast-apply path needs its edit tool, so leave tools enabled.
+  -- On the regen path the marked window rides along with the user's request.
+  local instructions
+  if use_regen then
+    instructions = "<edit_window>\n" .. marked_window .. "\n</edit_window>\n\n" .. input
+  elseif use_morph then
+    instructions = input
+  else
+    instructions = "Do not call any tools and just response the request: " .. input
+  end
 
   local Helpers = require("avante.llm_tools.helpers")
 
@@ -408,6 +476,29 @@ function Selection:submit_input(input)
       local region, verr, detail =
         Morph.scoped_region_change(morph_code_lines, merged_lines, morph_start_lnum, morph_finish_lnum)
       EditTrace.add("guard", { ok = region ~= nil, verr = verr, detail = detail })
+      if region == nil and use_regen then
+        -- Fuzzy rescue, regen path only: the intended change provably lives inside
+        -- the window the model regenerated, so out-of-region drift in the merge is
+        -- discardable -- align the merge against the crop and keep just the aligned
+        -- selection region. Landmark drafts must NOT get this: their rejects mean
+        -- Morph edited the wrong duplicate, and discarding would silently no-op the
+        -- user's request (benched 0/8 correct there vs 6/6 on regen).
+        while #merged_lines > 0 and merged_lines[#merged_lines]:match("^%s*$") do
+          table.remove(merged_lines)
+        end
+        local rescued = Morph.fuzzy_align_region(
+          morph_code_lines,
+          merged_lines,
+          morph_start_lnum - 1,
+          #morph_code_lines - morph_finish_lnum
+        )
+        -- A rescue identical to the original selection would silently drop the
+        -- user's request; fall through to the reject-and-retry loop instead.
+        if table.concat(rescued, "\n") ~= table.concat(original_selection_lines, "\n") then
+          region = rescued
+          EditTrace.add("rescue", { region = table.concat(rescued, "\n") })
+        end
+      end
       if region == nil then
         on_done("rejected", verr, detail)
         return
@@ -455,6 +546,75 @@ function Selection:submit_input(input)
     parts[#parts + 1] =
       "Everything else -- including comments and blank lines right next to the selection -- must be left exactly as it is: cover it with `... existing code ...` markers or reproduce it byte-for-byte as anchors. Call edit_file again with a corrected code_edit."
     return table.concat(parts, "\n")
+  end
+
+  -- Regen-flavored variant: the model's unit of work is the whole edit window, so
+  -- point it back at the window bounds instead of at landmark mechanics.
+  ---@param verr string
+  ---@param detail? AvanteMorphRejectDetail
+  local function regen_reject_feedback(verr, detail)
+    local parts = {
+      "REJECTED: the applied edit changed the file outside the region the user selected, so ALL of it was discarded and the file is unchanged.",
+    }
+    if detail and (detail.where == "before" or detail.where == "after") then
+      parts[#parts + 1] = ("%s the selection, the line `%s` became `%s`."):format(
+        detail.where == "before" and "Above" or "Below",
+        detail.orig,
+        detail.merged
+      )
+    else
+      parts[#parts + 1] = "Context around the selection was deleted or reordered (" .. verr .. ")."
+    end
+    parts[#parts + 1] = ("Call rewrite_window again with the ENTIRE edit window -- it starts at the line `%s` and ends at the line `%s` -- copying every line outside the <selection> markers exactly as shown, byte for byte, and applying the change only inside the selection."):format(
+      code_lines[window_start] or "",
+      code_lines[window_finish] or ""
+    )
+    return table.concat(parts, "\n")
+  end
+
+  -- Shared tail for both drafting tools: relay a rejected merge back to the model
+  -- while attempts remain, otherwise end the turn.
+  ---@param tool_opts table
+  ---@param feedback_fn fun(verr: string, detail?: AvanteMorphRejectDetail): string
+  local function make_confine_done(tool_opts, feedback_fn)
+    return function(status, verr, detail)
+      if status == "rejected" then
+        if draft.attempts < MAX_DRAFT_ATTEMPTS then
+          -- The user asked for high visibility on these: one notification per
+          -- failed attempt, no `once` dedup.
+          Utils.warn(
+            ("Selection edit: attempt %d/%d rejected — %s. Sending the validation error back to the model for another try."):format(
+              draft.attempts,
+              MAX_DRAFT_ATTEMPTS,
+              verr
+            ),
+            { title = "Avante" }
+          )
+          -- An error tool result keeps the agent loop going: it re-prompts the
+          -- drafting model with this feedback and the tool call history.
+          local feedback = feedback_fn(verr, detail)
+          EditTrace.add("feedback", { text = feedback })
+          tool_opts.on_complete(nil, feedback)
+          return
+        end
+        flusher.done = true
+        if self.prompt_input then self.prompt_input:stop_spinner() end
+        EditTrace.add(
+          "final",
+          { status = "gave up", note = ("rejected %d times — %s"):format(draft.attempts, verr) }
+        )
+        Utils.error(
+          ("Selection edit: giving up after %d attempts — %s. The buffer was left unchanged."):format(
+            draft.attempts,
+            verr
+          ),
+          { title = "Avante" }
+        )
+      end
+      -- "applied" and "failed" are fully handled in morph_apply_and_confine;
+      -- everything terminal ends the drafting turn here.
+      tool_opts.on_complete(nil, Helpers.CANCEL_TOKEN)
+    end
   end
 
   local edit_file_tool = {
@@ -524,44 +684,58 @@ function Selection:submit_input(input)
       if morph_instruction == nil or morph_instruction == "" then
         morph_instruction = "Apply the update to the selected region only, leaving the rest of the file unchanged."
       end
-      morph_apply_and_confine(code_edit, morph_instruction, function(status, verr, detail)
-        if status == "rejected" then
-          if draft.attempts < MAX_DRAFT_ATTEMPTS then
-            -- The user asked for high visibility on these: one notification per
-            -- failed attempt, no `once` dedup.
-            Utils.warn(
-              ("Selection edit: attempt %d/%d rejected — %s. Sending the validation error back to the model for another try."):format(
-                draft.attempts,
-                MAX_DRAFT_ATTEMPTS,
-                verr
-              ),
-              { title = "Avante" }
-            )
-            -- An error tool result keeps the agent loop going: it re-prompts the
-            -- drafting model with this feedback and the tool call history.
-            local feedback = reject_feedback(verr, detail)
-            EditTrace.add("feedback", { text = feedback })
-            tool_opts.on_complete(nil, feedback)
-            return
-          end
+      morph_apply_and_confine(code_edit, morph_instruction, make_confine_done(tool_opts, reject_feedback))
+      -- Async tool: the agent loop waits for tool_opts.on_complete.
+      return nil, nil
+    end,
+  }
+
+  local rewrite_window_tool = {
+    name = "rewrite_window",
+    description = "Submit the rewritten edit window: the entire window shown in <edit_window>, with the user's "
+      .. "change applied and every line outside the <selection> markers copied exactly, byte for byte. Do not "
+      .. "include the <selection> and </selection> marker lines. Only the user's selection may change: if the "
+      .. "applied result touches anything outside it, the whole edit is rejected and the validation error is "
+      .. "returned to you so you can call this tool again with a corrected window.",
+    param = {
+      type = "table",
+      fields = {
+        {
+          name = "code",
+          type = "string",
+          description = "The whole edit window, first line to last, as it should read after the change.",
+        },
+      },
+    },
+    returns = {
+      { name = "success", type = "boolean", description = "Whether the edit was applied" },
+    },
+    func = function(tool_input, tool_opts)
+      if tool_opts.streaming then return nil, nil end
+      if draft.applied then return nil, Helpers.CANCEL_TOKEN end
+      draft.attempts = draft.attempts + 1
+      local code = tool_input.code
+      EditTrace.add("rewrite", { attempt = draft.attempts, code = code })
+      if code == nil or code == "" then
+        if draft.attempts >= MAX_DRAFT_ATTEMPTS then
           flusher.done = true
           if self.prompt_input then self.prompt_input:stop_spinner() end
           EditTrace.add(
             "final",
-            { status = "gave up", note = ("rejected %d times — %s"):format(draft.attempts, verr) }
+            { status = "gave up", note = "no usable draft after " .. draft.attempts .. " attempts" }
           )
           Utils.error(
-            ("Selection edit: giving up after %d attempts — %s. The buffer was left unchanged."):format(
-              draft.attempts,
-              verr
+            ("Selection edit: no usable draft after %d attempts. The buffer was left unchanged."):format(
+              draft.attempts
             ),
             { title = "Avante" }
           )
+          return nil, Helpers.CANCEL_TOKEN
         end
-        -- "applied" and "failed" are fully handled in morph_apply_and_confine;
-        -- everything terminal ends the drafting turn here.
-        tool_opts.on_complete(nil, Helpers.CANCEL_TOKEN)
-      end)
+        return nil,
+          "rewrite_window was called without code; nothing was applied. Call it again with the whole edit window in code."
+      end
+      morph_apply_and_confine(window_to_update(code), input, make_confine_done(tool_opts, regen_reject_feedback))
       -- Async tool: the agent loop waits for tool_opts.on_complete.
       return nil, nil
     end,
@@ -609,8 +783,8 @@ function Selection:submit_input(input)
     if flusher.done then return end
     flusher.done = true
 
-    -- The model never called edit_file: fall back to treating its raw text as the
-    -- draft. No tool round-trip exists here, so a rejection is final.
+    -- The model never called its edit tool: fall back to treating its raw text as
+    -- the draft. No tool round-trip exists here, so a rejection is final.
     local code_edit = flusher.full_response
     if code_edit == nil or code_edit == "" then
       EditTrace.add("final", { status = "failed", note = "the model did not produce an edit" })
@@ -619,6 +793,12 @@ function Selection:submit_input(input)
       return
     end
     EditTrace.add("draft_text", { text = code_edit })
+    if use_regen then
+      -- Salvage a fenced block if the model answered in prose, then treat the text
+      -- as the regenerated window.
+      local fenced = code_edit:match("```[%w_]*\n(.-)```")
+      code_edit = window_to_update(fenced or code_edit)
+    end
     morph_apply_and_confine(
       code_edit,
       "Apply the update to the selected region only, leaving the rest of the file unchanged.",
@@ -643,8 +823,8 @@ function Selection:submit_input(input)
     code_lang = filetype,
     selected_code = selected_code,
     instructions = instructions,
-    mode = use_morph and "editing_morph" or "editing",
-    tools = use_morph and { edit_file_tool } or nil,
+    mode = use_regen and "editing_regen" or (use_morph and "editing_morph" or "editing"),
+    tools = use_morph and { use_regen and rewrite_window_tool or edit_file_tool } or nil,
     get_history_messages = use_morph and get_history_messages or nil,
     on_messages_add = use_morph and on_messages_add or nil,
     on_start = on_start,

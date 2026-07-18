@@ -56,7 +56,11 @@ local function render(run)
   local lines = {}
   lines[#lines + 1] = ("# Selection edit — %s"):format(run.started_at)
   lines[#lines + 1] = ""
-  lines[#lines + 1] = ("- file: `%s` (%s)"):format(meta.path or "?", meta.filetype or "?")
+  lines[#lines + 1] = ("- file: `%s` (%s), protocol: %s"):format(
+    meta.path or "?",
+    meta.filetype or "?",
+    meta.protocol or "landmark"
+  )
   lines[#lines + 1] = ("- selection: lines %d-%d, crop: lines %d-%d"):format(
     meta.sel_start or 0,
     meta.sel_finish or 0,
@@ -71,6 +75,15 @@ local function render(run)
     if ev.kind == "context" then
       header(lines, ev.ms, "client → model", "crop shown to the drafting model and Morph")
       fence(lines, meta.filetype, d.crop)
+    elseif ev.kind == "window" then
+      header(lines, ev.ms, "client → model", "edit window with the selection marked")
+      fence(lines, meta.filetype, d.window)
+    elseif ev.kind == "rewrite" then
+      header(lines, ev.ms, "model → rewrite_window", ("attempt %d"):format(d.attempt or 0))
+      fence(lines, meta.filetype, d.code)
+    elseif ev.kind == "rescue" then
+      header(lines, ev.ms, "fuzzy rescue", "out-of-region drift discarded; applied region:")
+      fence(lines, meta.filetype, d.region)
     elseif ev.kind == "draft" then
       header(lines, ev.ms, "model → edit_file", ("attempt %d"):format(d.attempt or 0))
       lines[#lines + 1] = ("instructions: %s"):format(d.instructions or "")
