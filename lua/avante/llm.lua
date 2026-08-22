@@ -1956,7 +1956,14 @@ function M._stream(opts)
       local pending_tools, pending_tool_use_messages = History.get_pending_tools(history_messages)
       -- Fast mode ends a turn when the model finishes its edit + explanation; the
       -- agentic attempt_completion/write_todos nag would force pointless extra rounds.
-      if stop_opts.reason == "complete" and Config.mode == "agentic" and opts.mode ~= "fast" then
+      -- Only nag when attempt_completion is actually offered: with tool sets that
+      -- lack it (fast chat, the no-selection float prompt) the model can never
+      -- satisfy the check, so the reminder looped it into "no further changes"
+      -- edit_file calls whose Morph merges repainted the pending overlay forever.
+      local has_attempt_completion = vim
+        .iter(prompt_opts.tools or {})
+        :any(function(tool) return tool.name == "attempt_completion" end)
+      if stop_opts.reason == "complete" and Config.mode == "agentic" and has_attempt_completion then
         local completed_attempt_completion_tool_use = nil
         for idx = #history_messages, 1, -1 do
           local message = history_messages[idx]
@@ -2018,7 +2025,14 @@ function M._stream(opts)
         end
       end
       if stop_opts.reason == "tool_use" then
-        opts.session_ctx.user_reminder_count = 0
+        -- Re-arm the nag budget only when the round signaled progress via the
+        -- planning/completion tools. Resetting on every tool round let a model
+        -- that answers the reminder with ordinary tool calls dodge the cap and
+        -- loop forever.
+        local progress_signaled = vim.iter(pending_tools or {}):any(
+          function(tool) return tool.name == "attempt_completion" or tool.name == "write_todos" end
+        )
+        if progress_signaled then opts.session_ctx.user_reminder_count = 0 end
         return handle_next_tool_use(pending_tools, pending_tool_use_messages, 1, {}, stop_opts.streaming_tool_use)
       end
       if stop_opts.reason == "rate_limit" then
