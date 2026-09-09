@@ -294,6 +294,28 @@ function M.get_visual_selection_and_range()
     start_line, end_line = end_line, start_line
     start_col, end_col = end_col, start_col
   end
+  -- `content` stays whole-line (callers render it as a code block), so the exact
+  -- columns are the only record that the user selected part of a line. Normalize
+  -- them here: linewise and blockwise selections cannot be described by a single
+  -- start/end column pair, so they report the full first and last lines.
+  local visual_mode = fn.mode()
+  local end_line_text = fn.getline(end_line)
+  if visual_mode ~= "v" then
+    start_col = 1
+    end_col = #end_line_text
+  else
+    -- Both columns are byte indices and both are inclusive. 'selection' =
+    -- exclusive parks the cursor on the first byte after the selection, so the
+    -- last selected byte is the one before it; inclusive parks it on the first
+    -- byte of the last selected character, so grow it to that character's end.
+    if vim.o.selection == "exclusive" then
+      end_col = end_col - 1
+    elseif end_col >= 1 and end_col <= #end_line_text then
+      end_col = end_col + vim.str_utf_end(end_line_text, end_col)
+    end
+    end_col = math.max(0, math.min(end_col, #end_line_text))
+    if start_line == end_line and end_col < start_col then end_col = start_col - 1 end
+  end
   local content = "" -- luacheck: ignore
   local range = Range:new({ lnum = start_line, col = start_col }, { lnum = end_line, col = end_col })
   -- Check if it's a single-line selection

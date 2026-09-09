@@ -391,9 +391,22 @@ function M.generate_prompts(opts)
   end
 
   if Config.unicode_math then
-    system_prompt = system_prompt
-      .. "\n\n"
-      .. [[The reply you show the user is rendered in a terminal that displays Markdown but does NOT render LaTeX or other math markup. Do not write LaTeX in your reply: avoid $...$, $$...$$, \(...\), \[...\], and commands such as \frac, \sum, \sqrt, \alpha. Write mathematics directly with Unicode instead -- Greek letters (α, β, γ, Σ, Π, μ, σ), relations and operators (≤, ≥, ≠, ≈, ×, ·, ÷, √, ∑, ∏, ∫, ∂, →), and sub/superscripts (xᵢ, x², aₙ); write fractions inline as a/b or (a + b)/c. This governs the prose you show the user; when you edit a file, keep that file's own math syntax.]]
+    -- The Unicode rule is about a chat surface, and the selection-edit modes have
+    -- none: their whole output is file content. Telling them to prefer Unicode over
+    -- LaTeX there is not just noise, it invites Unicode math into source files. Those
+    -- modes get the file-syntax half alone; everything else gets both, with the
+    -- file-syntax half worded to survive weak models (they read the Unicode rule as
+    -- global and start avoiding \(...\) inside .tex files).
+    local file_math_rule =
+      [[ABSOLUTE RULE, no exceptions: inside a file you write math in that file's own syntax, exactly the way the surrounding file already writes it. NEVER substitute Unicode characters for the file's math notation, and never "fix" or reformat notation the user did not ask you to touch. A LaTeX file keeps \frac, \sum, \sqrt, \alpha, \(...\), $...$; a Typst file keeps Typst's own syntax; a file that already writes math in Unicode keeps Unicode. Match the file, always.]]
+    if mode == "editing" or mode == "editing_morph" or mode == "editing_regen" then
+      system_prompt = system_prompt .. "\n\n" .. file_math_rule
+    else
+      system_prompt = system_prompt
+        .. "\n\n"
+        .. [[The reply you show the user is rendered in a terminal that displays Markdown but does NOT render LaTeX or other math markup. Do not write LaTeX in your reply: avoid $...$, $$...$$, \(...\), \[...\], and commands such as \frac, \sum, \sqrt, \alpha. Write mathematics directly with Unicode instead -- Greek letters (α, β, γ, Σ, Π, μ, σ), relations and operators (≤, ≥, ≠, ≈, ×, ·, ÷, √, ∑, ∏, ∫, ∂, →), and sub/superscripts (xᵢ, x², aₙ); write fractions inline as a/b or (a + b)/c. That rule governs the prose of your reply and NOTHING else: it stops at the edge of a file. ]]
+        .. file_math_rule
+    end
   end
 
   ---@type AvanteLLMMessage[]

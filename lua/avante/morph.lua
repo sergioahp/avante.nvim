@@ -173,7 +173,7 @@ function M.apply(original_code, update, instructions, on_complete)
 end
 
 ---@class AvanteMorphRejectDetail
----@field where "before"|"after"|"length"
+---@field where "before"|"after"|"length"|"prefix"|"suffix"
 ---@field lnum? integer 1-indexed buffer line of the stray change
 ---@field orig? string original content of the line that changed
 ---@field merged? string what the merge turned it into
@@ -240,6 +240,44 @@ function M.scoped_region_change(orig_lines, merged_lines, start_lnum, finish_lnu
     region[#region + 1] = merged_lines[i]
   end
   return region, nil
+end
+
+---Second half of the guard, for selections that start or end mid-line.
+---`scoped_region_change` only sees whole lines, so it cannot tell that the user
+---selected one cell of a row: check that the unselected text on the two boundary
+---lines came back byte-for-byte.
+---@param region string[] the new lines replacing the selected lines
+---@param prefix string text on the first selected line before the selection
+---@param suffix string text on the last selected line after the selection
+---@return string|nil err nil when both boundaries survived
+---@return AvanteMorphRejectDetail|nil detail
+---A selection is free to grow across lines (making a signature or a JSON array
+---multi-line is a normal request), so the prefix only has to lead the region's
+---first line and the suffix only has to trail its last. Trailing whitespace on
+---the suffix is ignored for the same reason it is ignored above: Morph strips it
+---on lines it otherwise leaves alone. Leading whitespace in the prefix is real
+---indentation, so it is compared byte for byte.
+function M.check_region_boundaries(region, prefix, suffix)
+  local suffix_t = suffix:gsub("%s+$", "")
+  if prefix == "" and suffix_t == "" then return nil end
+  if #region == 0 then
+    return "the whole selected line was deleted, including the text outside the selection",
+      { where = "prefix", orig = prefix, merged = "" }
+  end
+  if #region == 1 and #region[1] < #prefix + #suffix_t then
+    return "the line came back too short to still contain the text outside the selection",
+      { where = "prefix", orig = prefix, merged = region[1] }
+  end
+  if prefix ~= "" and region[1]:sub(1, #prefix) ~= prefix then
+    return "the text before the selection, on the selection's own line, was changed",
+      { where = "prefix", orig = prefix, merged = region[1] }
+  end
+  local last = region[#region]:gsub("%s+$", "")
+  if suffix_t ~= "" and last:sub(-#suffix_t) ~= suffix_t then
+    return "the text after the selection, on the selection's own line, was changed",
+      { where = "suffix", orig = suffix, merged = region[#region] }
+  end
+  return nil
 end
 
 return M

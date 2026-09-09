@@ -61,9 +61,10 @@ local function render(run)
     meta.filetype or "?",
     meta.protocol or "landmark"
   )
-  lines[#lines + 1] = ("- selection: lines %d-%d, crop: lines %d-%d"):format(
+  lines[#lines + 1] = ("- selection: lines %d-%d%s, crop: lines %d-%d"):format(
     meta.sel_start or 0,
     meta.sel_finish or 0,
+    meta.sel_start_col and (" (columns %d-%d, partial line)"):format(meta.sel_start_col, meta.sel_finish_col) or "",
     meta.crop_start or 0,
     meta.crop_finish or 0
   )
