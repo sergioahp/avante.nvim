@@ -59,9 +59,9 @@ local function render(run)
   lines[#lines + 1] = ("- file: `%s` (%s), protocol: %s"):format(
     meta.path or "?",
     meta.filetype or "?",
-    meta.protocol or "landmark"
+    meta.protocol or "regen"
   )
-  lines[#lines + 1] = ("- selection: lines %d-%d%s, crop: lines %d-%d"):format(
+  lines[#lines + 1] = ("- selection: lines %d-%d%s, apply crop: lines %d-%d"):format(
     meta.sel_start or 0,
     meta.sel_finish or 0,
     meta.sel_start_col and (" (columns %d-%d, partial line)"):format(meta.sel_start_col, meta.sel_finish_col) or "",
@@ -74,8 +74,11 @@ local function render(run)
   for _, ev in ipairs(run.events) do
     local d = ev.data
     if ev.kind == "context" then
-      header(lines, ev.ms, "client → model", "crop shown to the drafting model and Morph")
+      header(lines, ev.ms, "client → morph", "crop the merge is applied to (the drafting model sees a wider span)")
       fence(lines, meta.filetype, d.crop)
+    elseif ev.kind == "draft_context" then
+      header(lines, ev.ms, "client → model", "file span shown for comprehension, with the selection marked")
+      fence(lines, meta.filetype, d.context)
     elseif ev.kind == "window" then
       header(lines, ev.ms, "client → model", "edit window with the selection marked")
       fence(lines, meta.filetype, d.window)

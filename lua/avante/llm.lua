@@ -399,7 +399,7 @@ function M.generate_prompts(opts)
     -- global and start avoiding \(...\) inside .tex files).
     local file_math_rule =
       [[ABSOLUTE RULE, no exceptions: inside a file you write math in that file's own syntax, exactly the way the surrounding file already writes it. NEVER substitute Unicode characters for the file's math notation, and never "fix" or reformat notation the user did not ask you to touch. A LaTeX file keeps \frac, \sum, \sqrt, \alpha, \(...\), $...$; a Typst file keeps Typst's own syntax; a file that already writes math in Unicode keeps Unicode. Match the file, always.]]
-    if mode == "editing" or mode == "editing_morph" or mode == "editing_regen" then
+    if mode == "editing" or mode == "editing_regen" then
       system_prompt = system_prompt .. "\n\n" .. file_math_rule
     else
       system_prompt = system_prompt

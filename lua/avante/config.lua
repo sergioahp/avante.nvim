@@ -1089,12 +1089,12 @@ M._defaults = {
   --- (e.g. providers.claude.edit_stream_flush_interval_ms = 16 for a fast model,
   --- or = 0 to opt that provider out of coalescing entirely).
   --- @field fastapply boolean Route the visual-selection edit through the Morph
-  --- fast-apply model: the configured provider drafts the edit by calling the
-  --- edit_file tool (editing_morph.avanterules), then the `morph` provider merges
-  --- the snippet using the whole file as context and the merge is confined back to
-  --- the selected region client-side. Requires the `morph` provider configured
-  --- (MORPH_API_KEY). When off (default) the selection edit uses the inline <code>
-  --- replacement.
+  --- fast-apply model: the configured provider rewrites a small marked window
+  --- around the selection via the rewrite_window tool (editing_regen.avanterules),
+  --- then the `morph` provider merges that window into a tight crop of the file and
+  --- the merge is confined back to the selected region client-side. Requires the
+  --- `morph` provider configured (MORPH_API_KEY). When off (default) the selection
+  --- edit uses the inline <code> replacement.
   --- @field diff_highlight_timeout_ms integer Duration for visual-selection edit highlights
   --- after a successful visual-selection edit. 0 disables the highlight.
   selection = {

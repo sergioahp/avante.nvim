@@ -20,16 +20,26 @@ describe("morph.crop_around_selection", function()
     assert.are.same("line 15", cropped[start_lnum])
   end)
 
-  it("grows each side in proportion to a larger selection", function()
+  it("keeps the same six lines regardless of how large the selection is", function()
     local cropped, start_lnum, finish_lnum, source_start, source_finish =
       Morph.crop_around_selection(numbered_lines(60), 20, 29)
-    assert.are.same(10, source_start)
-    assert.are.same(39, source_finish)
-    assert.are.same(11, start_lnum)
-    assert.are.same(20, finish_lnum)
-    assert.are.same(30, #cropped)
+    assert.are.same(14, source_start)
+    assert.are.same(35, source_finish)
+    assert.are.same(7, start_lnum)
+    assert.are.same(16, finish_lnum)
+    assert.are.same(22, #cropped)
     assert.are.same("line 20", cropped[start_lnum])
     assert.are.same("line 29", cropped[finish_lnum])
+  end)
+
+  -- The crop only has to cover the edit window (selection +/- 3) plus room for the
+  -- landmarks wrapping it; anything wider is extra anchors for Morph to mis-place on.
+  it("stays wider than the edit window on both sides", function()
+    local lines = numbered_lines(60)
+    local _, _, _, crop_start, crop_finish = Morph.crop_around_selection(lines, 20, 29)
+    local window_start, window_finish = Morph.window_around_selection(lines, 20, 29)
+    assert.is_true(crop_start < window_start)
+    assert.is_true(crop_finish > window_finish)
   end)
 
   it("clamps context at the start of the file", function()
@@ -72,6 +82,37 @@ describe("morph.window_around_selection", function()
     local ws, wf = Morph.window_around_selection(numbered_lines(10), 1, 9)
     assert.are.same(1, ws)
     assert.are.same(10, wf)
+  end)
+end)
+
+describe("morph.draft_context_around_selection", function()
+  local function numbered_lines(count)
+    local lines = {}
+    for i = 1, count do
+      lines[i] = "line " .. i
+    end
+    return lines
+  end
+
+  it("keeps a hundred context lines on each side", function()
+    local cs, cf = Morph.draft_context_around_selection(numbered_lines(500), 200, 202)
+    assert.are.same(100, cs)
+    assert.are.same(302, cf)
+  end)
+
+  it("clamps at the buffer edges", function()
+    local cs, cf = Morph.draft_context_around_selection(numbered_lines(20), 5, 6)
+    assert.are.same(1, cs)
+    assert.are.same(20, cf)
+  end)
+
+  -- The point of the split: the drafting model sees far more than the apply model.
+  it("is much wider than the apply crop", function()
+    local lines = numbered_lines(500)
+    local _, _, _, crop_start, crop_finish = Morph.crop_around_selection(lines, 200, 202)
+    local cs, cf = Morph.draft_context_around_selection(lines, 200, 202)
+    assert.is_true(cs < crop_start)
+    assert.is_true(cf > crop_finish)
   end)
 end)
 
