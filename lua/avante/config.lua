@@ -1095,16 +1095,21 @@ M._defaults = {
   --- the merge is confined back to the selected region client-side. Requires the
   --- `morph` provider configured (MORPH_API_KEY). When off (default) the selection
   --- edit uses the inline <code> replacement.
-  --- @field diff_highlight_timeout_ms integer Duration for visual-selection edit highlights
-  --- showing deleted virtual text and added buffer text together. 0 skips the
-  --- combined stage.
+  --- @field diff_highlight_instant boolean Apply selection edits immediately,
+  --- then show deleted virtual text alongside additions. When false, flash
+  --- deletions before applying the edit, then highlight changed tokens.
+  --- @field diff_highlight_timeout_ms integer Duration for the combined diff
+  --- stage (instant mode), or each deletion/insertion flash (legacy mode).
+  --- 0 skips the combined stage in instant mode and disables legacy highlights.
   --- @field diff_highlight_added_timeout_ms integer Duration to keep only the
-  --- added-text highlight after the combined diff stage. 0 clears it immediately.
+  --- added-text highlight after the combined diff stage in instant mode.
+  --- 0 clears it immediately.
   selection = {
     enabled = true,
     hint_display = "delayed",
     edit_stream_flush_interval_ms = 33,
     fastapply = false,
+    diff_highlight_instant = true,
     diff_highlight_timeout_ms = 100,
     diff_highlight_added_timeout_ms = 500,
   },

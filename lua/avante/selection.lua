@@ -133,6 +133,8 @@ function Selection:submit_input(input)
   local code_content = table.concat(code_lines, "\n")
   local original_selection_lines =
     vim.list_slice(code_lines, self.selection.range.start.lnum, self.selection.range.finish.lnum)
+  local instant_diff = Config.selection.diff_highlight_instant
+  local show_diff = instant_diff and SelectionDiffHighlight.show_transition or SelectionDiffHighlight.show
 
   -- A charwise selection can start and end mid-line, and everything below works in
   -- whole lines. The unselected text on the two boundary lines is carried here as a
@@ -170,6 +172,10 @@ function Selection:submit_input(input)
     finish_line = self.selection.range.finish.lnum,
     need_prepend_indentation = false,
     original_first_line_indentation = Utils.get_indentation(code_lines[self.selection.range.start.lnum]),
+    response_complete = false,
+    delete_flash_attempted = false,
+    delete_flash_pending = false,
+    after_pending_flush = nil,
   }
 
   if self.prompt_input then self.prompt_input:start_spinner() end
@@ -179,14 +185,20 @@ function Selection:submit_input(input)
 
   local function do_flush(on_applied)
     if flusher.done then return false end
+    if flusher.delete_flash_pending then
+      if on_applied then flusher.after_pending_flush = on_applied end
+      return false
+    end
     if not api.nvim_buf_is_valid(self.code_bufnr) then return false end
     local response_lines_ = vim.split(flusher.full_response, "\n")
     local response_lines = {}
     local in_code_block = false
+    local saw_code_block = false
     local line_processed
     for _, line in ipairs(response_lines_) do
       if line:match("^<code>") then
         in_code_block = true
+        saw_code_block = true
         line_processed = line:gsub("^<code>", ""):gsub("</code>.*$", "")
         if line_processed ~= "" then table.insert(response_lines, line_processed) end
       elseif line:match("</code>") then
@@ -196,6 +208,15 @@ function Selection:submit_input(input)
       elseif in_code_block then
         table.insert(response_lines, line)
       end
+    end
+    -- Opening tags and prose can arrive before any replacement text. Keep the
+    -- selection until usable code arrives, or an explicit empty block completes.
+    if not saw_code_block then return false end
+    if
+      table.concat(response_lines, "\n") == ""
+      and (not flusher.response_complete or not flusher.full_response:find("</code>", 1, true))
+    then
+      return false
     end
     -- The prefix already carries the first line's indentation when the selection
     -- starts mid-line, so the re-indent heuristic must stay out of the way.
@@ -211,9 +232,31 @@ function Selection:submit_input(input)
     end
     -- Partial-line selection: the model replaces only the selected text, so the
     -- untouched head and tail of the boundary lines go back around it.
-    if partial_selection and #response_lines > 0 then
+    if partial_selection then
+      if #response_lines == 0 then response_lines = { "" } end
       response_lines[1] = sel_prefix .. response_lines[1]
       response_lines[#response_lines] = response_lines[#response_lines] .. sel_suffix
+    end
+
+    if not instant_diff and not flusher.delete_flash_attempted then
+      if not flusher.response_complete and #response_lines < #original_selection_lines then return false end
+      flusher.delete_flash_attempted = true
+      local delayed = SelectionDiffHighlight.flash_deletions_before(
+        self.code_bufnr,
+        original_selection_lines,
+        response_lines,
+        flusher.start_line,
+        function()
+          local after_pending_flush = flusher.after_pending_flush or on_applied
+          flusher.after_pending_flush = nil
+          flusher.delete_flash_pending = false
+          do_flush(after_pending_flush)
+        end
+      )
+      if delayed then
+        flusher.delete_flash_pending = true
+        return false
+      end
     end
 
     local ok = pcall(
@@ -276,12 +319,7 @@ function Selection:submit_input(input)
       if api.nvim_buf_is_valid(self.code_bufnr) then
         local new_selection_lines =
           api.nvim_buf_get_lines(self.code_bufnr, flusher.start_line - 1, flusher.finish_line, false)
-        SelectionDiffHighlight.show_transition(
-          self.code_bufnr,
-          original_selection_lines,
-          new_selection_lines,
-          flusher.start_line
-        )
+        show_diff(self.code_bufnr, original_selection_lines, new_selection_lines, flusher.start_line)
       end
       vim.defer_fn(function() self:close_editing_input() end, 0)
       Utils.debug("full response:", flusher.full_response)
@@ -289,8 +327,9 @@ function Selection:submit_input(input)
 
     -- Final synchronous flush so the tail chunks land before we tear down,
     -- then block any pending throttle timer from firing on stale state.
+    flusher.response_complete = true
     local applied = do_flush(finish)
-    if not applied then finish() end
+    if not applied and not flusher.delete_flash_pending then finish() end
   end
 
   local filetype = api.nvim_get_option_value("filetype", { buf = self.code_bufnr })
@@ -449,30 +488,39 @@ function Selection:submit_input(input)
   local MAX_DRAFT_ATTEMPTS = 3
   local draft = { attempts = 0, applied = false }
 
-  -- Write the confined region immediately, then briefly reconstruct the old text
-  -- with virtual text so both sides of the diff are visible together.
+  -- Instant mode writes the confined region before reconstructing the old text
+  -- with virtual text. Legacy mode flashes deletions before writing the region.
   local function apply_confined_region(region)
-    if not api.nvim_buf_is_valid(self.code_bufnr) then return end
-    local ok = pcall(
-      function()
-        api.nvim_buf_set_lines(
-          self.code_bufnr,
-          self.selection.range.start.lnum - 1,
-          self.selection.range.finish.lnum,
-          true,
-          region
-        )
-      end
-    )
-    if ok then
-      SelectionDiffHighlight.show_transition(
+    local function apply_region()
+      if not api.nvim_buf_is_valid(self.code_bufnr) then return end
+      local ok = pcall(
+        function()
+          api.nvim_buf_set_lines(
+            self.code_bufnr,
+            self.selection.range.start.lnum - 1,
+            self.selection.range.finish.lnum,
+            true,
+            region
+          )
+        end
+      )
+      if ok then show_diff(self.code_bufnr, original_selection_lines, region, self.selection.range.start.lnum) end
+      vim.defer_fn(function() self:close_editing_input() end, 0)
+    end
+
+    if instant_diff then
+      apply_region()
+    elseif
+      not SelectionDiffHighlight.flash_deletions_before(
         self.code_bufnr,
         original_selection_lines,
         region,
-        self.selection.range.start.lnum
+        self.selection.range.start.lnum,
+        apply_region
       )
+    then
+      apply_region()
     end
-    vim.defer_fn(function() self:close_editing_input() end, 0)
   end
 
   ---The confined region reduced to what the user actually highlighted. For a
