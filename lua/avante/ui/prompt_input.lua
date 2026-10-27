@@ -11,6 +11,7 @@ local Utils = require("avante.utils")
 ---@field augroup integer | nil
 ---@field start_insert boolean
 ---@field submit_callback function | nil
+---@field review_callback function | nil
 ---@field cancel_callback function | nil
 ---@field close_on_submit boolean
 ---@field spinner_chars table
@@ -32,6 +33,7 @@ PromptInput.__index = PromptInput
 ---@class avante.ui.PromptInputOptions
 ---@field start_insert? boolean
 ---@field submit_callback? fun(input: string, opts: { switch_on: boolean }):nil
+---@field review_callback? fun(input: string):nil submit a selection edit for review
 ---@field cancel_callback? fun():nil
 ---@field close_on_submit? boolean
 ---@field win_opts? table
@@ -48,6 +50,7 @@ function PromptInput:new(opts)
   obj.augroup = api.nvim_create_augroup("PromptInput", { clear = true })
   obj.start_insert = opts.start_insert or false
   obj.submit_callback = opts.submit_callback
+  obj.review_callback = opts.review_callback
   obj.cancel_callback = opts.cancel_callback
   obj.close_on_submit = opts.close_on_submit or false
   obj.win_opts = opts.win_opts
@@ -137,10 +140,14 @@ function PromptInput:cancel()
   if self.cancel_callback then self.cancel_callback() end
 end
 
-function PromptInput:submit(input)
+---@param input string
+---@param opts? { review?: boolean }
+function PromptInput:submit(input, opts)
   local switch_on = self.switch_on
+  local callback = self.submit_callback
+  if opts and opts.review then callback = self.review_callback end
   if self.close_on_submit then self:close() end
-  if self.submit_callback then self.submit_callback(input, { switch_on = switch_on }) end
+  if callback then callback(input, { switch_on = switch_on }) end
 end
 
 function PromptInput:show_shortcuts_hints()
@@ -153,7 +160,9 @@ function PromptInput:show_shortcuts_hints()
   local buf_height = api.nvim_buf_line_count(self.bufnr)
 
   local hint_text = (vim.fn.mode() ~= "i" and Config.mappings.submit.normal or Config.mappings.submit.insert)
-    .. ": submit"
+    .. (self.review_callback and ": apply" or ": submit")
+
+  if self.review_callback then hint_text = hint_text .. "  " .. Config.mappings.submit.review .. ": review" end
 
   if self.switch then
     local active = self.switch_on and self.switch.on or self.switch.off
@@ -262,6 +271,15 @@ function PromptInput:setup_keymaps()
     function() self:submit(get_input()) end,
     { buffer = bufnr, noremap = true, silent = true }
   )
+
+  if self.review_callback then
+    vim.keymap.set(
+      { "i", "n" },
+      Config.mappings.submit.review,
+      function() self:submit(get_input(), { review = true }) end,
+      { buffer = bufnr, noremap = true, silent = true, desc = "Avante: submit selection edit for review" }
+    )
+  end
 
   for _, key in ipairs(Config.mappings.cancel.normal) do
     vim.keymap.set("n", key, function() self:cancel() end, { buffer = bufnr })

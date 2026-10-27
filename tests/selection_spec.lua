@@ -38,6 +38,7 @@ describe("selection edit highlighting", function()
       diagnostics = Utils.lsp.get_current_selection_diagnostics,
       options = Config._options,
       defer_fn = vim.defer_fn,
+      login = vim.g.avante_login,
     }
     timers = {}
     Config._options = vim.deepcopy(Config._defaults)
@@ -67,6 +68,8 @@ describe("selection edit highlighting", function()
   end)
 
   after_each(function()
+    if selection.prompt_input then selection.prompt_input:close() end
+    vim.g.avante_login = originals.login
     Llm.stream = originals.stream
     Provider.get_config = originals.get_config
     rawset(Provider, "morph", originals.morph_provider)
@@ -79,6 +82,40 @@ describe("selection edit highlighting", function()
     PendingEdits.dismiss_all(bufnr)
     api.nvim_buf_delete(bufnr, { force = true })
   end)
+
+  for _, mode in ipairs({ "i", "n" }) do
+    it("submits a pending selection review directly with Ctrl+J in " .. mode .. " mode", function()
+      vim.g.avante_login = true
+      Config.windows.edit.start_insert = false
+      api.nvim_set_current_buf(bufnr)
+      selection:create_editing_input("rename the value", 1, 1)
+      local mapping = vim.fn.maparg("<C-j>", mode, false, true)
+      assert.is_function(mapping.callback)
+      assert.is_nil(selection.prompt_input.switch)
+      mapping.callback()
+      assert.is_true(stream.selection_review)
+      stream.tools[1].func({ code = new_line }, { on_complete = function() end })
+      assert.are.same({ old_line }, lines())
+      assert.is_true(PendingEdits.has_pending(bufnr))
+      PendingEdits.accept_all(bufnr)
+      assert.are.same({ new_line }, lines())
+    end)
+  end
+
+  for _, mapping in ipairs({ { mode = "i", key = "<C-s>" }, { mode = "n", key = "<CR>" } }) do
+    it("still applies a selection edit directly with " .. mapping.key, function()
+      vim.g.avante_login = true
+      Config.windows.edit.start_insert = false
+      Config.selection.fastapply = true
+      api.nvim_set_current_buf(bufnr)
+      selection:create_editing_input("rename the value", 1, 1)
+      vim.fn.maparg(mapping.key, mapping.mode, false, true).callback()
+      assert.is_false(stream.selection_review)
+      stream.tools[1].func({ code = new_line }, { on_complete = function() end })
+      assert.are.same({ new_line }, lines())
+      assert.is_false(PendingEdits.has_pending(bufnr))
+    end)
+  end
 
   it("preserves the selection while the opening code tag streams", function()
     selection:submit_input("rename the value")

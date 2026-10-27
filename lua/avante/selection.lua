@@ -1050,14 +1050,8 @@ function Selection:create_editing_input(request, line1, line2)
     default_value = request,
     -- Both routes use the same marked edit window and selection guard. Review
     -- renders pending hunks; edit writes the validated region immediately.
-    switch = { off = "edit", on = "review" },
-    submit_callback = function(input, sopts)
-      if sopts and sopts.switch_on then
-        self:submit_input(input, { review = true })
-      else
-        self:submit_input(input)
-      end
-    end,
+    submit_callback = function(input) self:submit_input(input) end,
+    review_callback = function(input) self:submit_input(input, { review = true }) end,
     cancel_callback = function() self:close_editing_input() end,
     win_opts = {
       border = Config.windows.edit.border,

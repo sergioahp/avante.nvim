@@ -559,6 +559,7 @@ If both are used, options passed to `setup()` override values from `vim.g.avante
     submit = {
       normal = "<CR>",
       insert = "<C-s>",
+      review = "<C-j>", -- Selection edit: submit for review, in normal or insert mode
     },
     cancel = {
       normal = { "<C-c>", "<Esc>", "q" },
@@ -1128,10 +1129,12 @@ the prompt opens. This annotation is context only and is not part of the file
 sent to Morph.
 
 For a constrained selection edit, select text with `v` or `V`, press
-`<leader>ae`, then press `<Tab>` in the prompt to switch from `edit` to
-`review`. Submit with `<C-s>` in insert mode or `<CR>` in normal mode. Both
-routes use the same marked selection and regenerated edit window. The review
-route leaves the buffer unchanged and displays pending hunks for acceptance.
+`<leader>ae`, type your request, then submit with `<C-j>` to review the edit.
+Use `<C-s>` in insert mode or `<CR>` in normal mode to apply it directly.
+The review shortcut works in both modes and can be changed with
+`mappings.submit.review`. Both routes use the same marked selection and
+regenerated edit window. The review route leaves the buffer unchanged and
+displays pending hunks for acceptance.
 Changes to text outside the selected lines and columns cannot be accepted;
 failed merges receive validation feedback for up to three drafting attempts.
 Blockwise selections are rejected by review mode rather than widened to whole

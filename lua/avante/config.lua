@@ -937,6 +937,7 @@ M._defaults = {
     submit = {
       normal = "<CR>",
       insert = "<C-s>",
+      review = "<C-j>", -- Submit a selection edit for review, in normal or insert mode
     },
     cancel = {
       normal = { "<C-c>", "<Esc>", "q" },
