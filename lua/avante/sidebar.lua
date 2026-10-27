@@ -151,6 +151,7 @@ Sidebar.__index = Sidebar
 ---@field winid integer
 ---@field bufnr integer
 ---@field selection avante.SelectionResult | nil
+---@field cursor? integer[] Last cursor in the source code window (1, 0 based)
 ---@field old_winhl string | nil
 ---@field win_width integer | nil
 
@@ -1778,6 +1779,7 @@ function Sidebar:initialize()
   self.code.winid = api.nvim_get_current_win()
   self.code.bufnr = api.nvim_get_current_buf()
   self.code.selection = Utils.get_visual_selection_and_range()
+  self.code.cursor = api.nvim_win_get_cursor(self.code.winid)
 
   if not self.code.bufnr or not api.nvim_buf_is_valid(self.code.bufnr) then return self end
 
@@ -2778,6 +2780,7 @@ end
 
 ---@param request string
 function Sidebar:handle_submit(request)
+  local pending_review = Config.chat_mode == "fast" and not Config.acp_providers[Config.provider]
   if Config.prompt_logger.enabled then PromptLogger.log_prompt(request) end
 
   if self.is_generating then
@@ -2947,7 +2950,7 @@ function Sidebar:handle_submit(request)
       if Utils.is_valid_container(self.containers.result, true) and Config.behaviour.jump_result_buffer_on_finish then
         api.nvim_set_current_win(self.containers.result.winid)
       end
-      if Config.behaviour.auto_apply_diff_after_generation then self:apply(false) end
+      if Config.behaviour.auto_apply_diff_after_generation and not pending_review then self:apply(false) end
     end, 0)
 
     Path.history.save(self.code.bufnr, self.chat_history)
@@ -3003,15 +3006,34 @@ function Sidebar:handle_submit(request)
     -- Its single edit_file lands as a pending virtual-text overlay in the code buffer
     -- (not sidebar conflict markers); the session, streaming and persistence stay the
     -- sidebar's as usual, so the reply streams live here and the thread is saved.
-    if
-      Config.chat_mode == "fast"
-      and not Config.acp_providers[Config.provider]
-      and self.code.bufnr
-      and api.nvim_buf_is_valid(self.code.bufnr)
-    then
-      stream_options.mode = "fast"
+    if pending_review and self.code.bufnr and api.nvim_buf_is_valid(self.code.bufnr) then
+      local Fast = require("avante.fast")
+      if self.code.selection then
+        local review = require("avante.selection").review_options({
+          prompt = request,
+          bufnr = self.code.bufnr,
+          selection = self.code.selection,
+        })
+        if not review then
+          on_stop({ reason = "cancelled" })
+          return
+        end
+        stream_options.mode = review.mode
+        stream_options.selection_review = true
+        stream_options.instructions = review.instructions
+        stream_options.selected_files = review.selected_files
+        stream_options.selected_filepaths = nil
+        stream_options.selected_code = review.selected_code
+        stream_options.tools = review.tools
+      else
+        local context = require("avante.edit_context")
+        self.code.cursor = context.cursor(self.code.bufnr, self.code.winid) or self.code.cursor
+        stream_options.mode = "fast"
+        stream_options.selected_files = { context.file(self.code.bufnr, self.code.cursor) }
+        stream_options.selected_filepaths = nil
+        stream_options.tools = Fast.make_fast_tools(self.code.bufnr, { with_diagnostics = true })
+      end
       stream_options.prompt_opts = nil -- force the fast template, ignore any saved system prompt
-      stream_options.tools = require("avante.fast").make_fast_tools(self.code.bufnr, { with_diagnostics = true })
     end
 
     ---@param pending_compaction_history_messages avante.HistoryMessage[]

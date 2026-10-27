@@ -1120,6 +1120,36 @@ return {
 
 See [highlights.lua](./lua/avante/highlights.lua) for more information
 
+## Review edits before applying
+
+The normal-mode `<leader>ae` prompt proposes edits to the current file. The
+drafting model sees a `<cursor/>` annotation at the code cursor captured before
+the prompt opens. This annotation is context only and is not part of the file
+sent to Morph.
+
+For a constrained selection edit, select text with `v` or `V`, press
+`<leader>ae`, then press `<Tab>` in the prompt to switch from `edit` to
+`review`. Submit with `<C-s>` in insert mode or `<CR>` in normal mode. Both
+routes use the same marked selection and regenerated edit window. The review
+route leaves the buffer unchanged and displays pending hunks for acceptance.
+Changes to text outside the selected lines and columns cannot be accepted;
+failed merges receive validation feedback for up to three drafting attempts.
+Blockwise selections are rejected by review mode rather than widened to whole
+lines.
+
+With `chat_mode = "fast"`, sidebar and zen requests also produce pending edits.
+Visual selections use the same constrained review path; requests without a
+selection include the code-window cursor. These review flows do not apply
+automatically, including when `behaviour.auto_apply_diff_after_generation` is
+enabled.
+
+Bind review controls from `require("avante.fast")` in your configuration:
+`accept_or_next()` accepts the change under the cursor or jumps to the next
+one, `reject_under_cursor()` discards one change, `accept_all()` accepts the
+proposal, and `dismiss_all()` discards it. Pending proposals are invalidated
+if the buffer changes before acceptance; accepting one hunk keeps the other
+hunks available.
+
 ## Fast Apply
 
 Fast Apply is a feature that enables instant code edits with high accuracy by leveraging specialized models. It replicates Cursor's instant apply functionality, allowing for seamless code modifications without the typical delays associated with traditional code generation.

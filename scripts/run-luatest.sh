@@ -41,13 +41,16 @@ setup_deps() {
         mkdir -p "$DEPS_DIR"
         git clone --depth 1 "https://github.com/nvim-lua/plenary.nvim.git" "$plenary_path"
     fi
+    if [ ! -d "$DEPS_DIR/nui.nvim" ]; then
+        log "Cloning nui.nvim..."
+        git clone --depth 1 "https://github.com/MunifTanjim/nui.nvim.git" "$DEPS_DIR/nui.nvim"
+    fi
 }
 
 run_tests() {
     log "Running tests..."
-    nvim --headless --clean \
-        -c "set runtimepath+=$DEPS_DIR/plenary.nvim" \
-        -c "lua require('plenary.test_harness').test_directory('tests/', { minimal_init = 'NONE' })"
+    nvim --headless --clean -u tests/minimal_init.lua \
+        -c "lua require('plenary.test_harness').test_directory('tests/', { minimal_init = 'tests/minimal_init.lua' })"
 }
 
 main() {

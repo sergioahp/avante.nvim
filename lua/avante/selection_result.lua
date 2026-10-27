@@ -1,4 +1,5 @@
 ---@class avante.SelectionResult
+---@field visual_mode? string
 ---@field filepath string Filepath of the selected content
 ---@field filetype string Filetype of the selected content
 ---@field content string Selected content

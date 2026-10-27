@@ -210,6 +210,7 @@ end
 ---@param request? string
 function M.fast_prompt(request)
   local bufnr = vim.api.nvim_get_current_buf()
+  local cursor = vim.api.nvim_win_get_cursor(0)
   local prompt_input
   prompt_input = PromptInput:new({
     default_value = request,
@@ -219,6 +220,7 @@ function M.fast_prompt(request)
       require("avante.fast").submit({
         prompt = input,
         bufnr = bufnr,
+        cursor = cursor,
         ephemeral = true,
         with_diagnostics = sopts ~= nil and sopts.switch_on == true,
       })

@@ -9,6 +9,7 @@ local SelectionDiffHighlight = require("avante.selection_diff_highlight")
 local Range = require("avante.range")
 local Morph = require("avante.morph")
 local EditTrace = require("avante.edit_trace")
+local PendingEdits = require("avante.pending_edits")
 
 local api = vim.api
 local fn = vim.fn
@@ -117,7 +118,11 @@ function Selection:close_editing_input()
   end
 end
 
-function Selection:submit_input(input)
+---@param input string
+---@param opts? { review?: boolean, capture?: boolean, on_state?: fun(state: string), on_done?: fun(result: table) }
+function Selection:submit_input(input, opts)
+  opts = opts or {}
+  local review = opts.review == true
   if not input then
     Utils.error("No input provided", { once = true, title = "Avante" })
     return
@@ -130,11 +135,30 @@ function Selection:submit_input(input)
     return
   end
   local code_lines = api.nvim_buf_get_lines(self.code_bufnr, 0, -1, false)
+  local changedtick = api.nvim_buf_get_changedtick(self.code_bufnr)
   local code_content = table.concat(code_lines, "\n")
   local original_selection_lines =
     vim.list_slice(code_lines, self.selection.range.start.lnum, self.selection.range.finish.lnum)
   local instant_diff = Config.selection.diff_highlight_instant
   local show_diff = instant_diff and SelectionDiffHighlight.show_transition or SelectionDiffHighlight.show
+  if review then
+    if self.selection.visual_mode == "\22" then
+      Utils.error("Selection review supports characterwise (v) and linewise (V) selections.", { title = "Avante" })
+      return
+    end
+    if table.concat(original_selection_lines, "\n") ~= self.selection.content then
+      Utils.error("The selected text changed; select it again before requesting a review.", { title = "Avante" })
+      return
+    end
+  end
+
+  local review_done = false
+  local function finish_review(result)
+    if not review or review_done then return end
+    review_done = true
+    if opts.on_state then opts.on_state("done") end
+    if opts.on_done then opts.on_done(result) end
+  end
 
   -- A charwise selection can start and end mid-line, and everything below works in
   -- whole lines. The unselected text on the two boundary lines is carried here as a
@@ -153,8 +177,12 @@ function Selection:submit_input(input)
     slice[#slice] = slice[#slice]:sub(1, #slice[#slice] - #sel_suffix)
     local text = table.concat(slice, "\n")
     -- A degenerate range (nothing actually between the columns) is not something
-    -- the model can act on; fall back to the whole-line selection.
-    if vim.trim(text) == "" then
+    -- the model can act on. The automatic editor falls back to whole lines;
+    -- review must preserve the user's exact scope and rejects an empty range.
+    if review and text == "" then
+      Utils.error("Select some text before requesting a review.", { title = "Avante" })
+      return
+    elseif not review and vim.trim(text) == "" then
       partial_selection = false
       sel_prefix, sel_suffix = "", ""
     else
@@ -377,7 +405,13 @@ function Selection:submit_input(input)
   -- the turn via CANCEL_TOKEN. Falls back to the inline <code> replacement when Morph
   -- isn't configured.
   local morph_provider = Provider["morph"]
-  local use_morph = Config.selection.fastapply and morph_provider ~= nil and morph_provider.is_env_set()
+  local use_morph = (review or Config.selection.fastapply) and morph_provider ~= nil and morph_provider.is_env_set()
+  if review and not use_morph then
+    if self.prompt_input then self.prompt_input:stop_spinner() end
+    Utils.error("Selection review needs the morph provider configured.", { title = "Avante" })
+    finish_review({ applied = false, error = "Morph is unavailable" })
+    return
+  end
 
   ---Render a line range with the selection marked. The markers go inline when the
   ---selection starts or ends mid-line: marker lines of their own would tell the
@@ -491,6 +525,16 @@ function Selection:submit_input(input)
   -- Instant mode writes the confined region before reconstructing the old text
   -- with virtual text. Legacy mode flashes deletions before writing the region.
   local function apply_confined_region(region)
+    if review then
+      local proposed = vim.list_slice(code_lines, 1, self.selection.range.start.lnum - 1)
+      vim.list_extend(proposed, region)
+      vim.list_extend(proposed, vim.list_slice(code_lines, self.selection.range.finish.lnum + 1))
+      local n = PendingEdits.set(self.code_bufnr, code_lines, proposed, { strict = true })
+      Utils.info(("Avante: %d pending selection edit(s); <Tab> to review."):format(n), { title = "Avante" })
+      finish_review({ applied = false, pending = n > 0, hunks = n })
+      vim.defer_fn(function() self:close_editing_input() end, 0)
+      return
+    end
     local function apply_region()
       if not api.nvim_buf_is_valid(self.code_bufnr) then return end
       local ok = pcall(
@@ -564,12 +608,26 @@ function Selection:submit_input(input)
   ---@param on_done fun(status: "applied"|"failed"|"rejected", verr?: string, detail?: AvanteMorphRejectDetail)
   local function morph_apply_and_confine(code_edit, morph_instruction, on_done)
     Morph.apply(morph_code_content, code_edit, morph_instruction, function(merged, err)
+      if
+        review
+        and (
+          not api.nvim_buf_is_valid(self.code_bufnr) or api.nvim_buf_get_changedtick(self.code_bufnr) ~= changedtick
+        )
+      then
+        flusher.done = true
+        if self.prompt_input then self.prompt_input:stop_spinner() end
+        Utils.warn("The buffer changed while preparing the selection review; submit again.", { title = "Avante" })
+        finish_review({ applied = false, error = "Buffer changed" })
+        on_done("failed")
+        return
+      end
       if err or merged == nil then
         EditTrace.add("morph", { err = err or "unknown error" })
         EditTrace.add("final", { status = "failed", note = "Morph apply failed" })
         flusher.done = true
         if self.prompt_input then self.prompt_input:stop_spinner() end
         Utils.error("Morph apply failed: " .. (err or "unknown error"), { once = true, title = "Avante" })
+        finish_review({ applied = false, error = err or "Morph apply failed" })
         on_done("failed")
         return
       end
@@ -582,7 +640,7 @@ function Selection:submit_input(input)
       if region ~= nil then
         -- ... and, for a selection that starts or ends mid-line, only the selected
         -- columns of the boundary lines.
-        local berr, bdetail = Morph.check_region_boundaries(region, sel_prefix, sel_suffix)
+        local berr, bdetail = Morph.check_region_boundaries(region, sel_prefix, sel_suffix, { strict = review })
         if berr then
           region, verr, detail = nil, berr, bdetail
         end
@@ -611,7 +669,7 @@ function Selection:submit_input(input)
         -- reject-and-retry loop in both cases.
         if
           table.concat(rescued, "\n") ~= table.concat(original_selection_lines, "\n")
-          and Morph.check_region_boundaries(rescued, sel_prefix, sel_suffix) == nil
+          and Morph.check_region_boundaries(rescued, sel_prefix, sel_suffix, { strict = review }) == nil
         then
           region = rescued
           EditTrace.add("rescue", { region = table.concat(rescued, "\n") })
@@ -632,7 +690,7 @@ function Selection:submit_input(input)
       flusher.done = true
       if self.prompt_input then self.prompt_input:stop_spinner() end
       apply_confined_region(region)
-      EditTrace.add("final", { status = "applied" })
+      EditTrace.add("final", { status = review and "pending review" or "applied" })
       on_done("applied")
     end)
   end
@@ -750,6 +808,7 @@ function Selection:submit_input(input)
           ),
           { title = "Avante" }
         )
+        finish_review({ applied = false, error = verr })
       end
       -- "applied" and "failed" are fully handled in morph_apply_and_confine;
       -- everything terminal ends the drafting turn here.
@@ -803,6 +862,7 @@ function Selection:submit_input(input)
             ),
             { title = "Avante" }
           )
+          finish_review({ applied = false, error = "No usable draft" })
           return nil, Helpers.CANCEL_TOKEN
         end
         return nil,
@@ -851,6 +911,7 @@ function Selection:submit_input(input)
       end
       if self.prompt_input then self.prompt_input:stop_spinner() end
       Utils.error("Error drafting the edit: " .. vim.inspect(stop_opts.error), { once = true, title = "Avante" })
+      finish_review({ applied = false, error = vim.inspect(stop_opts.error) })
       return
     end
     if flusher.done then return end
@@ -859,10 +920,17 @@ function Selection:submit_input(input)
     -- The model never called its edit tool: fall back to treating its raw text as
     -- the draft. No tool round-trip exists here, so a rejection is final.
     local code_edit = flusher.full_response
+    if review then
+      if self.prompt_input then self.prompt_input:stop_spinner() end
+      finish_review({ applied = false, text = code_edit })
+      vim.defer_fn(function() self:close_editing_input() end, 0)
+      return
+    end
     if code_edit == nil or code_edit == "" then
       EditTrace.add("final", { status = "failed", note = "the model did not produce an edit" })
       if self.prompt_input then self.prompt_input:stop_spinner() end
       Utils.error("The model did not produce an edit", { once = true, title = "Avante" })
+      finish_review({ applied = false, error = "No edit produced" })
       return
     end
     EditTrace.add("draft_text", { text = code_edit })
@@ -875,6 +943,7 @@ function Selection:submit_input(input)
       "Apply the update to the selected region only, leaving the rest of the file unchanged.",
       function(status, verr)
         if status == "rejected" then
+          finish_review({ applied = false, error = verr })
           EditTrace.add("final", { status = "rejected", note = verr })
           if self.prompt_input then self.prompt_input:stop_spinner() end
           Utils.error(
@@ -886,7 +955,7 @@ function Selection:submit_input(input)
     )
   end
 
-  Llm.stream({
+  local stream_opts = {
     ask = true,
     project_context = vim.json.encode(project_context),
     diagnostics = vim.json.encode(diagnostics),
@@ -895,6 +964,7 @@ function Selection:submit_input(input)
     selected_code = selected_code,
     instructions = instructions,
     mode = use_morph and "editing_regen" or "editing",
+    selection_review = review,
     tools = use_morph and { rewrite_window_tool } or nil,
     get_history_messages = use_morph and get_history_messages or nil,
     on_messages_add = use_morph and on_messages_add or nil,
@@ -902,6 +972,27 @@ function Selection:submit_input(input)
     on_chunk = use_morph and on_chunk_morph or on_chunk,
     on_reasoning_chunk = function() end,
     on_stop = use_morph and on_stop_morph or on_stop,
+  }
+  if review and opts.on_state then opts.on_state("start") end
+  if opts.capture then return stream_opts end
+  Llm.stream(stream_opts)
+end
+
+---@param opts avante.fast.SubmitOpts
+---@return AvanteLLMStreamOptions|nil
+function Selection.review_options(opts)
+  local bufnr = opts.bufnr
+  if not bufnr or bufnr == 0 then bufnr = api.nvim_get_current_buf() end
+  local selection = setmetatable({
+    code_bufnr = bufnr,
+    selection = vim.deepcopy(opts.selection),
+    close_editing_input = function() end,
+  }, Selection)
+  return selection:submit_input(opts.prompt, {
+    review = true,
+    capture = true,
+    on_state = opts.on_state,
+    on_done = opts.on_done,
   })
 end
 
@@ -957,15 +1048,12 @@ function Selection:create_editing_input(request, line1, line2)
 
   local prompt_input = PromptInput:new({
     default_value = request,
-    -- <Tab> off: the existing selection edit. On: hand the selection + prompt to
-    -- the fast chat, whose edits land as a pending overlay.
-    switch = { off = "edit", on = "chat" },
+    -- Both routes use the same marked edit window and selection guard. Review
+    -- renders pending hunks; edit writes the validated region immediately.
+    switch = { off = "edit", on = "review" },
     submit_callback = function(input, sopts)
       if sopts and sopts.switch_on then
-        local selection = self.selection
-        local code_bufnr = self.code_bufnr
-        self:close_editing_input()
-        require("avante.fast").submit({ prompt = input, bufnr = code_bufnr, selection = selection })
+        self:submit_input(input, { review = true })
       else
         self:submit_input(input)
       end

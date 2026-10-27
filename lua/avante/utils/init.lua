@@ -342,7 +342,9 @@ function M.get_visual_selection_and_range()
   local filepath = fn.expand("%:p")
   local filetype = M.get_filetype(filepath)
   -- Return the selected content and range
-  return SelectionResult:new(filepath, filetype, content, range)
+  local result = SelectionResult:new(filepath, filetype, content, range)
+  result.visual_mode = visual_mode
+  return result
 end
 
 ---Wrapper around `api.nvim_buf_get_lines` which defaults to the current buffer

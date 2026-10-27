@@ -278,8 +278,11 @@ end
 ---the suffix is ignored for the same reason it is ignored above: Morph strips it
 ---on lines it otherwise leaves alone. Leading whitespace in the prefix is real
 ---indentation, so it is compared byte for byte.
-function M.check_region_boundaries(region, prefix, suffix)
-  local suffix_t = suffix:gsub("%s+$", "")
+---Review mode uses strict comparisons to preserve even unselected whitespace.
+---@param opts? { strict?: boolean }
+function M.check_region_boundaries(region, prefix, suffix, opts)
+  local strict = opts and opts.strict
+  local suffix_t = strict and suffix or suffix:gsub("%s+$", "")
   if prefix == "" and suffix_t == "" then return nil end
   if #region == 0 then
     return "the whole selected line was deleted, including the text outside the selection",
@@ -293,7 +296,7 @@ function M.check_region_boundaries(region, prefix, suffix)
     return "the text before the selection, on the selection's own line, was changed",
       { where = "prefix", orig = prefix, merged = region[1] }
   end
-  local last = region[#region]:gsub("%s+$", "")
+  local last = strict and region[#region] or region[#region]:gsub("%s+$", "")
   if suffix_t ~= "" and last:sub(-#suffix_t) ~= suffix_t then
     return "the text after the selection, on the selection's own line, was changed",
       { where = "suffix", orig = suffix, merged = region[#region] }

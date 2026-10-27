@@ -100,6 +100,32 @@ describe("generate_prompts", function()
     if mock_dir:exists() then vim.fs.rm(tostring(mock_dir), { recursive = true }) end
   end)
 
+  for _, mode in ipairs({ "fast", "fast_ephemeral" }) do
+    it("keeps current cursor context after an earlier view in " .. mode, function()
+      local History = require("avante.history")
+      local original = History.Helpers.get_tool_use_data
+      local original_uniform_path = utils.uniform_path
+      utils.uniform_path = function(path) return path end
+      local rendered
+      History.Helpers.get_tool_use_data = function()
+        return { name = "view", id = "old-view", input = { path = "/example.lua" } }
+      end
+      require("avante.path").prompts.render_file = function(path, opts)
+        if path == "_context.avanterules" then rendered = opts.selected_files end
+        return ""
+      end
+      local ok, err = pcall(llm.generate_prompts, {
+        mode = mode,
+        history_messages = { History.Message:new("assistant", "old context") },
+        selected_files = { { path = "/example.lua", file_type = "lua", content = "local x = <cursor/>1" } },
+      })
+      History.Helpers.get_tool_use_data = original
+      utils.uniform_path = original_uniform_path
+      assert.is_true(ok, err)
+      assert.equals("local x = <cursor/>1", rendered[1].content)
+    end)
+  end
+
   it("should include instruction file content when the file exists", function()
     local opts = {}
     llm.generate_prompts(opts)

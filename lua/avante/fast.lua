@@ -6,6 +6,7 @@ local Morph = require("avante.morph")
 local PendingEdits = require("avante.pending_edits")
 local History = require("avante.history")
 local Path = require("avante.path")
+local EditContext = require("avante.edit_context")
 
 local api = vim.api
 
@@ -57,8 +58,8 @@ local edit_file_tool_param = {
 }
 
 ---Build the fast tool set bound to `bufnr`: a single `edit_file` that drafts to Morph
----and lands the merge as a pending overlay (reading the buffer FRESH at call time, so
----edits the user made since the last turn are picked up), plus an optional on-demand
+---and lands the merge as a pending overlay (reading the buffer fresh at call time,
+---rejecting edits made since this request's context was captured), plus an optional on-demand
 ---`get_diagnostics`. The Morph result is never returned to the model -- it gets only a
 ---tiny ack and keeps its turn for an explanation. Shared by the float prompt and the
 ---sidebar/zen fast mode.
@@ -67,6 +68,8 @@ local edit_file_tool_param = {
 ---@return table[]
 function M.make_fast_tools(bufnr, opts)
   opts = opts or {}
+  if bufnr == 0 then bufnr = api.nvim_get_current_buf() end
+  local request_tick = api.nvim_buf_get_changedtick(bufnr)
   local edit_file_tool = {
     name = "edit_file",
     description = "Make the requested change to the current file. A faster apply model merges your draft, so "
@@ -80,7 +83,13 @@ function M.make_fast_tools(bufnr, opts)
       if tool_opts and tool_opts.streaming then return end
       if opts.on_call then opts.on_call() end
       if not api.nvim_buf_is_valid(bufnr) then return "The target buffer is no longer open." end
+      if api.nvim_buf_get_changedtick(bufnr) ~= request_tick then
+        Utils.warn("Avante fast: buffer changed since the request; submit again.", { title = "Avante" })
+        if opts.on_applied then opts.on_applied(0) end
+        return nil, require("avante.llm_tools.helpers").CANCEL_TOKEN
+      end
       local code_lines = api.nvim_buf_get_lines(bufnr, 0, -1, false)
+      local changedtick = api.nvim_buf_get_changedtick(bufnr)
       local code_content = table.concat(code_lines, "\n")
       local code_edit = tool_input.code_edit or ""
       local instruction = tool_input.instructions
@@ -98,7 +107,12 @@ function M.make_fast_tools(bufnr, opts)
         local merged_lines = vim.split(merged, "\n")
         if #merged_lines > 1 and merged_lines[#merged_lines] == "" then table.remove(merged_lines) end
         if not api.nvim_buf_is_valid(bufnr) then return end
-        local n = PendingEdits.set(bufnr, code_lines, merged_lines)
+        if api.nvim_buf_get_changedtick(bufnr) ~= changedtick then
+          Utils.warn("Avante fast: buffer changed while preparing the edit; submit again.", { title = "Avante" })
+          if opts.on_applied then opts.on_applied(0) end
+          return
+        end
+        local n = PendingEdits.set(bufnr, code_lines, merged_lines, { strict = true })
         if n == 0 then
           Utils.info("Avante fast: no changes", { title = "Avante" })
         else
@@ -123,11 +137,12 @@ end
 ---@class avante.fast.SubmitOpts
 ---@field prompt string
 ---@field bufnr? integer target buffer (defaults to current)
----@field selection? avante.SelectionResult optional visual selection for extra context
+---@field cursor? integer[] source cursor captured before the prompt opens (1, 0 based)
+---@field selection? avante.SelectionResult restrict the pending edit to this selection
 ---@field with_diagnostics? boolean expose the get_diagnostics tool (the "+1"); default true
 ---@field ephemeral? boolean do not read from or write to sidebar chat history
 ---@field on_state? fun(state: "start"|"done") UI hook (spinner etc.)
----@field on_done? fun(result: { applied: boolean, hunks?: integer, error?: string })
+---@field on_done? fun(result: { applied: boolean, pending?: boolean, hunks?: integer, error?: string, text?: string })
 
 ---Run one fast-chat exchange against `opts.bufnr`. The model drafts the edit, Morph
 ---applies it, and the result shows up as pending hunks in the buffer.
@@ -144,11 +159,16 @@ function M.submit(opts)
     return
   end
 
+  if opts.selection then
+    local stream_opts = require("avante.selection").review_options(opts)
+    if stream_opts then return Llm.stream(stream_opts) end
+    return
+  end
+
   local bufnr = opts.bufnr or api.nvim_get_current_buf()
-  local code_lines = api.nvim_buf_get_lines(bufnr, 0, -1, false)
-  local code_content = table.concat(code_lines, "\n")
+  if bufnr == 0 then bufnr = api.nvim_get_current_buf() end
+  local context_file = EditContext.file(bufnr, opts.cursor)
   local filetype = api.nvim_get_option_value("filetype", { buf = bufnr })
-  local filepath = api.nvim_buf_get_name(bufnr)
 
   local ephemeral = opts.ephemeral == true
   local chat_history = nil
@@ -246,23 +266,12 @@ function M.submit(opts)
     if not morph_started then notify_done({ applied = false, text = vim.trim(final_text) }) end
   end
 
-  ---@type AvanteSelectedCode|nil
-  local selected_code = nil
-  if opts.selection then
-    selected_code = {
-      content = opts.selection.content,
-      file_type = opts.selection.filetype,
-      path = opts.selection.filepath,
-    }
-  end
-
   if opts.on_state then opts.on_state("start") end
 
   Llm.stream({
     ask = true,
-    selected_files = { { content = code_content, file_type = filetype, path = filepath } },
+    selected_files = { context_file },
     code_lang = filetype,
-    selected_code = selected_code,
     -- The current prompt is the last user message in `messages`; prior turns precede
     -- it so the model has the running conversation.
     history_messages = messages,

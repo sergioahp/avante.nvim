@@ -397,6 +397,7 @@ vim.g.avante_login = vim.g.avante_login
 ---@field file_type string
 ---
 ---@class AvanteTemplateOptions
+---@field selection_review? boolean Selection edits produce pending proposals; questions may be answered normally
 ---@field ask boolean
 ---@field code_lang string
 ---@field recently_viewed_files string[] | nil

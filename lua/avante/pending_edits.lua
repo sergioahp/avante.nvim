@@ -26,6 +26,7 @@ local DEL_HL = "AvanteToBeDeletedWOStrikethrough"
 
 ---@class avante.PendingState
 ---@field hunks avante.PendingHunk[]
+---@field changedtick? integer Invalidate guarded proposals after external buffer changes
 
 ---@type table<integer, avante.PendingState>
 local state = {}
@@ -380,11 +381,15 @@ end
 ---@param bufnr integer
 ---@param original_lines string[]
 ---@param merged_lines string[]
+---@param opts? { strict?: boolean }
 ---@return integer hunk_count
-function M.set(bufnr, original_lines, merged_lines)
+function M.set(bufnr, original_lines, merged_lines, opts)
   bufnr = resolve(bufnr)
   M.dismiss_all(bufnr)
   if not api.nvim_buf_is_valid(bufnr) then return 0 end
+  if opts and opts.strict and not vim.deep_equal(original_lines, api.nvim_buf_get_lines(bufnr, 0, -1, false)) then
+    return 0
+  end
 
   local hunks = vim.diff(
     table.concat(original_lines, "\n") .. "\n",
@@ -393,7 +398,7 @@ function M.set(bufnr, original_lines, merged_lines)
   )
   if not hunks or #hunks == 0 then return 0 end
 
-  local st = { hunks = {} }
+  local st = { hunks = {}, changedtick = opts and opts.strict and api.nvim_buf_get_changedtick(bufnr) or nil }
   for _, h in ipairs(hunks) do
     local start_a, count_a, start_b, count_b = h[1], h[2], h[3], h[4]
 
@@ -477,6 +482,19 @@ function M.has_pending(bufnr)
   return st ~= nil and #st.hunks > 0
 end
 
+local function can_accept(bufnr)
+  local st = state[bufnr]
+  if not st then return false end
+  if
+    not api.nvim_buf_is_valid(bufnr) or (st.changedtick and st.changedtick ~= api.nvim_buf_get_changedtick(bufnr))
+  then
+    M.dismiss_all(bufnr)
+    vim.notify("Avante: buffer changed; pending edits were discarded. Submit again.", vim.log.levels.WARN)
+    return false
+  end
+  return true
+end
+
 ---@param bufnr integer
 ---@param idx integer index into state[bufnr].hunks
 local function apply_hunk(bufnr, idx)
@@ -492,6 +510,7 @@ local function apply_hunk(bufnr, idx)
       local at = hunk.insert_above and row or row + 1
       api.nvim_buf_set_lines(bufnr, at, at, false, hunk.new_lines)
     end
+    if st.changedtick then st.changedtick = api.nvim_buf_get_changedtick(bufnr) end
   end
   clear_hunk(bufnr, hunk)
   table.remove(st.hunks, idx)
@@ -524,7 +543,7 @@ end
 ---@return boolean acted true if a hunk was accepted or the cursor moved
 function M.accept_or_next(bufnr)
   bufnr = resolve(bufnr)
-  if not M.has_pending(bufnr) then return false end
+  if not can_accept(bufnr) then return false end
 
   local idx = hunk_under_cursor(bufnr)
   if idx then
@@ -572,6 +591,7 @@ end
 ---@return boolean
 function M.accept_all(bufnr)
   bufnr = resolve(bufnr)
+  if not can_accept(bufnr) then return false end
   local st = state[bufnr]
   if not st or #st.hunks == 0 then return false end
   -- Each apply reads live extmark positions, so consuming from the front is safe.

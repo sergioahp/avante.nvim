@@ -309,7 +309,14 @@ function M.generate_prompts(opts)
     end
   end
 
-  selected_files = vim.iter(selected_files):filter(function(file) return viewed_files[file.path] == nil end):totable()
+  selected_files = vim
+    .iter(selected_files)
+    :filter(function(file)
+      -- Fast edits carry the current editor position. A prior view result must not
+      -- replace that context with an older, unmarked copy of the file.
+      return opts.mode == "fast" or opts.mode == "fast_ephemeral" or viewed_files[file.path] == nil
+    end)
+    :totable()
 
   local is_acp_provider = false
   if not opts.provider then is_acp_provider = Config.acp_providers[Config.provider] ~= nil end
@@ -326,6 +333,7 @@ function M.generate_prompts(opts)
 
   local template_opts = {
     ask = opts.ask, -- TODO: add mode without ask instruction
+    selection_review = opts.selection_review,
     code_lang = opts.code_lang,
     selected_files = selected_files,
     selected_code = opts.selected_code,
