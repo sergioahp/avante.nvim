@@ -7,23 +7,40 @@ local Utils = require("avante.utils")
 ---@class avante.Morph
 local M = {}
 
-local MIN_SELECTION_CONTEXT_LINES = 6
+---Padding around the selection in the file view the drafting model is shown.
+---Wide on purpose: that model has to understand the code before it can act on a
+---terse request, and the `<selection>` markers -- not a narrow view -- are what
+---tell it which region is the target. This view was once cropped to the same few
+---lines as the apply context below, back when a locally unique crop was the only
+---way the model could tell which of two identical lines was selected
+---(reports/selection-edit-context_2026-09-09.md).
+local DRAFT_CONTEXT_LINES = 100
 
----Selections up to this many lines take the regen-window drafting path: the
----client picks a small window around the selection and the model regenerates
----the whole window, instead of drafting a landmark sketch whose size is the
----model's choice. Benched (reports/regen-window-selection-edit_2026-07-18.md):
----small ambiguous selections are exactly where landmark drafts go wrong, and
----regenerating a client-sized window was the only 100% cell.
-M.REGEN_MAX_SELECTION_LINES = 12
-
+---Padding around the selection in the edit window the drafting model rewrites.
+---Deliberately NOT snapped to syntactic regions: wider, node-aligned windows
+---measurably hurt (they reach into comment runs and hand Morph more duplicate
+---anchors).
 local WINDOW_CONTEXT_LINES = 3
 
----Crop a buffer around a selected range for both the drafting and apply models.
----Small selections retain at least six lines on each side; once a selection is
----larger than that, each side grows linearly with the selection. Keeping the
----apply model away from distant code prevents unrelated normalization while the
----local context remains large enough to carry enclosing-block anchors.
+---Padding around the selection in the code handed to the apply model. It only
+---has to cover the edit window plus room for the landmarks wrapping it to
+---resolve; every line beyond that is one more anchor Morph can land on by
+---mistake, and wider context makes duplicate-anchor ambiguity worse rather than
+---better (reports/regen-window-selection-edit_2026-07-18.md).
+local APPLY_CONTEXT_LINES = WINDOW_CONTEXT_LINES + 3
+
+---@param lines string[] original whole-buffer lines
+---@param start_lnum integer 1-indexed first line of the selection
+---@param finish_lnum integer 1-indexed last line of the selection
+---@param padding integer whole lines to keep on each side, clamped at the file bounds
+---@return integer source_start_lnum
+---@return integer source_finish_lnum
+local function padded_range(lines, start_lnum, finish_lnum, padding)
+  if start_lnum < 1 or finish_lnum < start_lnum or finish_lnum > #lines then error("selection range out of bounds") end
+  return math.max(1, start_lnum - padding), math.min(#lines, finish_lnum + padding)
+end
+
+---Crop a buffer around a selected range for the apply model.
 ---@param lines string[] original whole-buffer lines
 ---@param start_lnum integer 1-indexed first line of the selection
 ---@param finish_lnum integer 1-indexed last line of the selection
@@ -33,11 +50,7 @@ local WINDOW_CONTEXT_LINES = 3
 ---@return integer source_start_lnum first whole-buffer line included in the crop
 ---@return integer source_finish_lnum last whole-buffer line included in the crop
 function M.crop_around_selection(lines, start_lnum, finish_lnum)
-  if start_lnum < 1 or finish_lnum < start_lnum or finish_lnum > #lines then error("selection range out of bounds") end
-  local selected_line_count = finish_lnum - start_lnum + 1
-  local context_line_count = math.max(MIN_SELECTION_CONTEXT_LINES, selected_line_count)
-  local source_start_lnum = math.max(1, start_lnum - context_line_count)
-  local source_finish_lnum = math.min(#lines, finish_lnum + context_line_count)
+  local source_start_lnum, source_finish_lnum = padded_range(lines, start_lnum, finish_lnum, APPLY_CONTEXT_LINES)
   local cropped_lines = {}
   for lnum = source_start_lnum, source_finish_lnum do
     cropped_lines[#cropped_lines + 1] = lines[lnum]
@@ -49,18 +62,26 @@ function M.crop_around_selection(lines, start_lnum, finish_lnum)
     source_finish_lnum
 end
 
----The edit window for the regen drafting path: the selection plus a few lines
----of context on each side, always whole lines. Deliberately NOT snapped to
----syntactic regions: wider, node-aligned windows measurably hurt (they reach
----into comment runs and hand Morph more duplicate anchors).
+---The edit window the drafting model regenerates: the selection plus a few lines
+---of context on each side, always whole lines.
 ---@param lines string[] original whole-buffer lines
 ---@param start_lnum integer 1-indexed first line of the selection
 ---@param finish_lnum integer 1-indexed last line of the selection
 ---@return integer window_start_lnum
 ---@return integer window_finish_lnum
 function M.window_around_selection(lines, start_lnum, finish_lnum)
-  if start_lnum < 1 or finish_lnum < start_lnum or finish_lnum > #lines then error("selection range out of bounds") end
-  return math.max(1, start_lnum - WINDOW_CONTEXT_LINES), math.min(#lines, finish_lnum + WINDOW_CONTEXT_LINES)
+  return padded_range(lines, start_lnum, finish_lnum, WINDOW_CONTEXT_LINES)
+end
+
+---The span of the file the drafting model is shown for comprehension. Much wider
+---than the window it rewrites and than the crop the apply model merges into.
+---@param lines string[] original whole-buffer lines
+---@param start_lnum integer 1-indexed first line of the selection
+---@param finish_lnum integer 1-indexed last line of the selection
+---@return integer context_start_lnum
+---@return integer context_finish_lnum
+function M.draft_context_around_selection(lines, start_lnum, finish_lnum)
+  return padded_range(lines, start_lnum, finish_lnum, DRAFT_CONTEXT_LINES)
 end
 
 ---Align model output against the original context lines around a selection and
@@ -173,7 +194,7 @@ function M.apply(original_code, update, instructions, on_complete)
 end
 
 ---@class AvanteMorphRejectDetail
----@field where "before"|"after"|"length"
+---@field where "before"|"after"|"length"|"prefix"|"suffix"|"unchanged"|"emptied"
 ---@field lnum? integer 1-indexed buffer line of the stray change
 ---@field orig? string original content of the line that changed
 ---@field merged? string what the merge turned it into
@@ -240,6 +261,44 @@ function M.scoped_region_change(orig_lines, merged_lines, start_lnum, finish_lnu
     region[#region + 1] = merged_lines[i]
   end
   return region, nil
+end
+
+---Second half of the guard, for selections that start or end mid-line.
+---`scoped_region_change` only sees whole lines, so it cannot tell that the user
+---selected one cell of a row: check that the unselected text on the two boundary
+---lines came back byte-for-byte.
+---@param region string[] the new lines replacing the selected lines
+---@param prefix string text on the first selected line before the selection
+---@param suffix string text on the last selected line after the selection
+---@return string|nil err nil when both boundaries survived
+---@return AvanteMorphRejectDetail|nil detail
+---A selection is free to grow across lines (making a signature or a JSON array
+---multi-line is a normal request), so the prefix only has to lead the region's
+---first line and the suffix only has to trail its last. Trailing whitespace on
+---the suffix is ignored for the same reason it is ignored above: Morph strips it
+---on lines it otherwise leaves alone. Leading whitespace in the prefix is real
+---indentation, so it is compared byte for byte.
+function M.check_region_boundaries(region, prefix, suffix)
+  local suffix_t = suffix:gsub("%s+$", "")
+  if prefix == "" and suffix_t == "" then return nil end
+  if #region == 0 then
+    return "the whole selected line was deleted, including the text outside the selection",
+      { where = "prefix", orig = prefix, merged = "" }
+  end
+  if #region == 1 and #region[1] < #prefix + #suffix_t then
+    return "the line came back too short to still contain the text outside the selection",
+      { where = "prefix", orig = prefix, merged = region[1] }
+  end
+  if prefix ~= "" and region[1]:sub(1, #prefix) ~= prefix then
+    return "the text before the selection, on the selection's own line, was changed",
+      { where = "prefix", orig = prefix, merged = region[1] }
+  end
+  local last = region[#region]:gsub("%s+$", "")
+  if suffix_t ~= "" and last:sub(-#suffix_t) ~= suffix_t then
+    return "the text after the selection, on the selection's own line, was changed",
+      { where = "suffix", orig = suffix, merged = region[#region] }
+  end
+  return nil
 end
 
 return M

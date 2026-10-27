@@ -391,9 +391,22 @@ function M.generate_prompts(opts)
   end
 
   if Config.unicode_math then
-    system_prompt = system_prompt
-      .. "\n\n"
-      .. [[The reply you show the user is rendered in a terminal that displays Markdown but does NOT render LaTeX or other math markup. Do not write LaTeX in your reply: avoid $...$, $$...$$, \(...\), \[...\], and commands such as \frac, \sum, \sqrt, \alpha. Write mathematics directly with Unicode instead -- Greek letters (α, β, γ, Σ, Π, μ, σ), relations and operators (≤, ≥, ≠, ≈, ×, ·, ÷, √, ∑, ∏, ∫, ∂, →), and sub/superscripts (xᵢ, x², aₙ); write fractions inline as a/b or (a + b)/c. This governs the prose you show the user; when you edit a file, keep that file's own math syntax.]]
+    -- The Unicode rule is about a chat surface, and the selection-edit modes have
+    -- none: their whole output is file content. Telling them to prefer Unicode over
+    -- LaTeX there is not just noise, it invites Unicode math into source files. Those
+    -- modes get the file-syntax half alone; everything else gets both, with the
+    -- file-syntax half worded to survive weak models (they read the Unicode rule as
+    -- global and start avoiding \(...\) inside .tex files).
+    local file_math_rule =
+      [[ABSOLUTE RULE, no exceptions: inside a file you write math in that file's own syntax, exactly the way the surrounding file already writes it. NEVER substitute Unicode characters for the file's math notation, and never "fix" or reformat notation the user did not ask you to touch. A LaTeX file keeps \frac, \sum, \sqrt, \alpha, \(...\), $...$; a Typst file keeps Typst's own syntax; a file that already writes math in Unicode keeps Unicode. Match the file, always.]]
+    if mode == "editing" or mode == "editing_regen" then
+      system_prompt = system_prompt .. "\n\n" .. file_math_rule
+    else
+      system_prompt = system_prompt
+        .. "\n\n"
+        .. [[The reply you show the user is rendered in a terminal that displays Markdown but does NOT render LaTeX or other math markup. Do not write LaTeX in your reply: avoid $...$, $$...$$, \(...\), \[...\], and commands such as \frac, \sum, \sqrt, \alpha. Write mathematics directly with Unicode instead -- Greek letters (α, β, γ, Σ, Π, μ, σ), relations and operators (≤, ≥, ≠, ≈, ×, ·, ÷, √, ∑, ∏, ∫, ∂, →), and sub/superscripts (xᵢ, x², aₙ); write fractions inline as a/b or (a + b)/c. That rule governs the prose of your reply and NOTHING else: it stops at the edge of a file. ]]
+        .. file_math_rule
+    end
   end
 
   ---@type AvanteLLMMessage[]
@@ -1956,7 +1969,14 @@ function M._stream(opts)
       local pending_tools, pending_tool_use_messages = History.get_pending_tools(history_messages)
       -- Fast mode ends a turn when the model finishes its edit + explanation; the
       -- agentic attempt_completion/write_todos nag would force pointless extra rounds.
-      if stop_opts.reason == "complete" and Config.mode == "agentic" and opts.mode ~= "fast" then
+      -- Only nag when attempt_completion is actually offered: with tool sets that
+      -- lack it (fast chat, the no-selection float prompt) the model can never
+      -- satisfy the check, so the reminder looped it into "no further changes"
+      -- edit_file calls whose Morph merges repainted the pending overlay forever.
+      local has_attempt_completion = vim
+        .iter(prompt_opts.tools or {})
+        :any(function(tool) return tool.name == "attempt_completion" end)
+      if stop_opts.reason == "complete" and Config.mode == "agentic" and has_attempt_completion then
         local completed_attempt_completion_tool_use = nil
         for idx = #history_messages, 1, -1 do
           local message = history_messages[idx]
@@ -2018,7 +2038,14 @@ function M._stream(opts)
         end
       end
       if stop_opts.reason == "tool_use" then
-        opts.session_ctx.user_reminder_count = 0
+        -- Re-arm the nag budget only when the round signaled progress via the
+        -- planning/completion tools. Resetting on every tool round let a model
+        -- that answers the reminder with ordinary tool calls dodge the cap and
+        -- loop forever.
+        local progress_signaled = vim.iter(pending_tools or {}):any(
+          function(tool) return tool.name == "attempt_completion" or tool.name == "write_todos" end
+        )
+        if progress_signaled then opts.session_ctx.user_reminder_count = 0 end
         return handle_next_tool_use(pending_tools, pending_tool_use_messages, 1, {}, stop_opts.streaming_tool_use)
       end
       if stop_opts.reason == "rate_limit" then

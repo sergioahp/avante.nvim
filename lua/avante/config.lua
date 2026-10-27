@@ -349,9 +349,10 @@ M._defaults = {
   chat_mode = "agentic",
   --- When true, the model is told that its replies are shown in a terminal that
   --- renders Markdown but NOT LaTeX, so it should write math with Unicode (β, Σ,
-  --- √, xᵢ, a/b) rather than LaTeX ($...$, \frac, ...). Applies to the model's
-  --- prose replies in every mode; it does not change the math syntax written
-  --- inside edited files (those follow the file's own language, e.g. typst).
+  --- √, xᵢ, a/b) rather than LaTeX ($...$, \frac, ...), and, in every mode, that
+  --- file contents keep the file's own math syntax regardless. The selection-edit
+  --- modes have no chat surface at all, so they are told only the second half:
+  --- telling them to prefer Unicode would push it into source files.
   ---@type boolean
   unicode_math = false,
   ---@alias avante.ProviderName "claude" | "openai" | "azure" | "gemini" | "vertex" | "cohere" | "copilot" | "bedrock" | "ollama" | "watsonx_code_assistant" | "mistral" | string
@@ -1088,12 +1089,12 @@ M._defaults = {
   --- (e.g. providers.claude.edit_stream_flush_interval_ms = 16 for a fast model,
   --- or = 0 to opt that provider out of coalescing entirely).
   --- @field fastapply boolean Route the visual-selection edit through the Morph
-  --- fast-apply model: the configured provider drafts the edit by calling the
-  --- edit_file tool (editing_morph.avanterules), then the `morph` provider merges
-  --- the snippet using the whole file as context and the merge is confined back to
-  --- the selected region client-side. Requires the `morph` provider configured
-  --- (MORPH_API_KEY). When off (default) the selection edit uses the inline <code>
-  --- replacement.
+  --- fast-apply model: the configured provider rewrites a small marked window
+  --- around the selection via the rewrite_window tool (editing_regen.avanterules),
+  --- then the `morph` provider merges that window into a tight crop of the file and
+  --- the merge is confined back to the selected region client-side. Requires the
+  --- `morph` provider configured (MORPH_API_KEY). When off (default) the selection
+  --- edit uses the inline <code> replacement.
   --- @field diff_highlight_timeout_ms integer Duration for visual-selection edit highlights
   --- showing deleted virtual text and added buffer text together. 0 skips the
   --- combined stage.

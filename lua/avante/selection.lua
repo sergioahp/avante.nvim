@@ -134,6 +134,32 @@ function Selection:submit_input(input)
   local original_selection_lines =
     vim.list_slice(code_lines, self.selection.range.start.lnum, self.selection.range.finish.lnum)
 
+  -- A charwise selection can start and end mid-line, and everything below works in
+  -- whole lines. The unselected text on the two boundary lines is carried here as a
+  -- prefix/suffix pair so the model is shown exactly what it may touch and the
+  -- client-side guard can refuse a merge that rewrote either side. Without this a
+  -- selection of one `[cell]` inside a row reads to the model as the whole row.
+  local sel_start_col = self.selection.range.start.col
+  local sel_finish_col = self.selection.range.finish.col
+  local sel_prefix = (original_selection_lines[1] or ""):sub(1, sel_start_col - 1)
+  local sel_suffix = (original_selection_lines[#original_selection_lines] or ""):sub(sel_finish_col + 1)
+  local selected_text = table.concat(original_selection_lines, "\n")
+  local partial_selection = sel_prefix ~= "" or sel_suffix ~= ""
+  if partial_selection then
+    local slice = vim.list_slice(original_selection_lines)
+    slice[1] = slice[1]:sub(sel_start_col)
+    slice[#slice] = slice[#slice]:sub(1, #slice[#slice] - #sel_suffix)
+    local text = table.concat(slice, "\n")
+    -- A degenerate range (nothing actually between the columns) is not something
+    -- the model can act on; fall back to the whole-line selection.
+    if vim.trim(text) == "" then
+      partial_selection = false
+      sel_prefix, sel_suffix = "", ""
+    else
+      selected_text = text
+    end
+  end
+
   -- Shared mutable state for the streaming edit. on_chunk only mutates fields
   -- here; do_flush reads them at fire time. See spec: closures over a single
   -- table, serialized through Neovim's main loop, so no race-safety needed.
@@ -171,7 +197,9 @@ function Selection:submit_input(input)
         table.insert(response_lines, line)
       end
     end
-    if #response_lines == 1 then
+    -- The prefix already carries the first line's indentation when the selection
+    -- starts mid-line, so the re-indent heuristic must stay out of the way.
+    if #response_lines == 1 and sel_prefix == "" then
       local first_line = response_lines[1]
       local first_line_indentation = Utils.get_indentation(first_line)
       flusher.need_prepend_indentation = first_line_indentation ~= flusher.original_first_line_indentation
@@ -180,6 +208,12 @@ function Selection:submit_input(input)
       for i, line in ipairs(response_lines) do
         response_lines[i] = flusher.original_first_line_indentation .. line
       end
+    end
+    -- Partial-line selection: the model replaces only the selected text, so the
+    -- untouched head and tail of the boundary lines go back around it.
+    if partial_selection and #response_lines > 0 then
+      response_lines[1] = sel_prefix .. response_lines[1]
+      response_lines[#response_lines] = response_lines[#response_lines] .. sel_suffix
     end
 
     local ok = pcall(
@@ -272,36 +306,67 @@ function Selection:submit_input(input)
   local selected_code = nil
 
   if self.selection then
+    -- `selection.content` is whole-line; `selected_text` is what the user actually
+    -- highlighted, down to the column. Showing the whole line here is what made a
+    -- one-cell selection look like a licence to rewrite the row.
     selected_code = {
-      content = self.selection.content,
+      content = selected_text,
       file_type = self.selection.filetype,
       path = self.selection.filepath,
     }
   end
 
   -- Fast-apply path: the configured (fast) provider drafts the edit and Morph merges
-  -- it into a proportional crop around the selection; the merge is confined back to
-  -- the selected region client-side. Two drafting protocols
-  -- (reports/regen-window-selection-edit_2026-07-18.md):
+  -- it into a tight crop around the selection; the merge is confined back to the
+  -- selected region client-side. One drafting protocol, for every selection size:
+  -- the client picks an edit window (selection plus a few lines each side), marks
+  -- the selection with <selection> tags, and the model regenerates the WHOLE window
+  -- via the rewrite_window tool. The client wraps the window in `... existing code
+  -- ...` landmarks itself, so the drafted span is never the model's choice -- tiny
+  -- ambiguous update blocks were the dominant failure and "output more lines"
+  -- instructions get ignored (reports/regen-window-selection-edit_2026-07-18.md).
   --
-  -- - Small selections (regen): the client picks an edit window (selection plus a few
-  --   lines each side), marks the selection with <selection> tags, and the model
-  --   regenerates the WHOLE window via the rewrite_window tool. The client wraps the
-  --   window in `... existing code ...` landmarks itself, so the drafted span is never
-  --   the model's choice -- tiny ambiguous update blocks were the dominant failure and
-  --   "output more lines" instructions get ignored.
-  -- - Larger selections (landmark): the model drafts an edit_file tool call (Morph's
-  --   documented path/instructions/code_edit sketch format with landmark comments).
+  -- Three spans, three consumers, deliberately different sizes
+  -- (reports/selection-edit-context_2026-09-09.md):
+  --   drafting model, for comprehension: selection +/- 100 lines, marked
+  --   drafting model, to rewrite:        selection +/- 3 lines, marked
+  --   apply model, to merge into:        selection +/- 6 lines, clean
   --
   -- A merge that strays outside the selection is returned to the drafting model as the
-  -- tool result, so it gets a few attempts to fix its draft; on the regen path a fuzzy
-  -- rescue first tries to salvage the merge by discarding out-of-region drift. Success
-  -- (or giving up) ends the turn via CANCEL_TOKEN. Falls back to the inline <code>
-  -- replacement when Morph isn't configured.
+  -- tool result, so it gets a few attempts to fix its draft; a fuzzy rescue first tries
+  -- to salvage the merge by discarding out-of-region drift. Success (or giving up) ends
+  -- the turn via CANCEL_TOKEN. Falls back to the inline <code> replacement when Morph
+  -- isn't configured.
   local morph_provider = Provider["morph"]
   local use_morph = Config.selection.fastapply and morph_provider ~= nil and morph_provider.is_env_set()
-  local selection_line_count = self.selection.range.finish.lnum - self.selection.range.start.lnum + 1
-  local use_regen = use_morph and selection_line_count <= Morph.REGEN_MAX_SELECTION_LINES
+
+  ---Render a line range with the selection marked. The markers go inline when the
+  ---selection starts or ends mid-line: marker lines of their own would tell the
+  ---model the whole boundary lines are fair game.
+  ---@param from integer 1-indexed first line of the range
+  ---@param to integer 1-indexed last line of the range
+  ---@return string
+  local function mark_range(from, to)
+    local marked = {}
+    for lnum = from, self.selection.range.start.lnum - 1 do
+      marked[#marked + 1] = code_lines[lnum]
+    end
+    if partial_selection then
+      local sel_lines = vim.list_slice(original_selection_lines)
+      sel_lines[1] = sel_prefix .. "<selection>" .. sel_lines[1]:sub(sel_start_col)
+      local last = sel_lines[#sel_lines]
+      sel_lines[#sel_lines] = last:sub(1, #last - #sel_suffix) .. "</selection>" .. sel_suffix
+      vim.list_extend(marked, sel_lines)
+    else
+      marked[#marked + 1] = "<selection>"
+      vim.list_extend(marked, original_selection_lines)
+      marked[#marked + 1] = "</selection>"
+    end
+    for lnum = self.selection.range.finish.lnum + 1, to do
+      marked[#marked + 1] = code_lines[lnum]
+    end
+    return table.concat(marked, "\n")
+  end
 
   local prompt_code_content = code_content
   local morph_code_lines = code_lines
@@ -310,49 +375,40 @@ function Selection:submit_input(input)
   local morph_finish_lnum = self.selection.range.finish.lnum
   local crop_source_start = 1
   local crop_source_finish = #code_lines
+  local marked_window
   local window_start, window_finish
+  local landmark_line = "// ... existing code ..."
   if use_morph then
     morph_code_lines, morph_start_lnum, morph_finish_lnum, crop_source_start, crop_source_finish =
       Morph.crop_around_selection(code_lines, self.selection.range.start.lnum, self.selection.range.finish.lnum)
     morph_code_content = table.concat(morph_code_lines, "\n")
-    prompt_code_content = morph_code_content
-    EditTrace.begin({
-      input = input,
-      path = self.selection.filepath,
-      filetype = filetype,
-      protocol = use_regen and "regen" or "landmark",
-      sel_start = self.selection.range.start.lnum,
-      sel_finish = self.selection.range.finish.lnum,
-      crop_start = crop_source_start,
-      crop_finish = crop_source_finish,
-    })
-    EditTrace.add("context", { crop = morph_code_content })
-  end
-
-  -- The marked edit window for the regen protocol, and the landmark line used to
-  -- wrap the regenerated window into a Morph update client-side.
-  local marked_window
-  local landmark_line = "// ... existing code ..."
-  if use_regen then
+    local context_start, context_finish = Morph.draft_context_around_selection(
+      code_lines,
+      self.selection.range.start.lnum,
+      self.selection.range.finish.lnum
+    )
+    prompt_code_content = mark_range(context_start, context_finish)
     window_start, window_finish =
       Morph.window_around_selection(code_lines, self.selection.range.start.lnum, self.selection.range.finish.lnum)
     local commentstring = vim.bo[self.code_bufnr].commentstring
     if commentstring and commentstring:find("%%s") then
       landmark_line = vim.trim(commentstring:format("... existing code ..."))
     end
-    local marked = {}
-    for lnum = window_start, self.selection.range.start.lnum - 1 do
-      marked[#marked + 1] = code_lines[lnum]
-    end
-    marked[#marked + 1] = "<selection>"
-    for lnum = self.selection.range.start.lnum, self.selection.range.finish.lnum do
-      marked[#marked + 1] = code_lines[lnum]
-    end
-    marked[#marked + 1] = "</selection>"
-    for lnum = self.selection.range.finish.lnum + 1, window_finish do
-      marked[#marked + 1] = code_lines[lnum]
-    end
-    marked_window = table.concat(marked, "\n")
+    marked_window = mark_range(window_start, window_finish)
+    EditTrace.begin({
+      input = input,
+      path = self.selection.filepath,
+      filetype = filetype,
+      protocol = "regen",
+      sel_start = self.selection.range.start.lnum,
+      sel_finish = self.selection.range.finish.lnum,
+      sel_start_col = partial_selection and sel_start_col or nil,
+      sel_finish_col = partial_selection and sel_finish_col or nil,
+      crop_start = crop_source_start,
+      crop_finish = crop_source_finish,
+    })
+    EditTrace.add("context", { crop = morph_code_content })
+    EditTrace.add("draft_context", { context = prompt_code_content })
     EditTrace.add("window", { window = marked_window })
   end
 
@@ -364,7 +420,11 @@ function Selection:submit_input(input)
     local window_lines = {}
     for _, line in ipairs(vim.split(code, "\n")) do
       local trimmed = vim.trim(line)
-      if trimmed ~= "<selection>" and trimmed ~= "</selection>" then window_lines[#window_lines + 1] = line end
+      if trimmed ~= "<selection>" and trimmed ~= "</selection>" then
+        -- Inline markers (partial-line selections) come off in place; a model that
+        -- echoes them must not turn them into file content.
+        window_lines[#window_lines + 1] = (line:gsub("</?selection>", ""))
+      end
     end
     if #window_lines > 1 and window_lines[#window_lines] == "" then table.remove(window_lines) end
     local update = {}
@@ -375,13 +435,11 @@ function Selection:submit_input(input)
   end
 
   -- The non-fast-apply path returns the full <code> region inline, so we forbid tool
-  -- calls there. The fast-apply path needs its edit tool, so leave tools enabled.
-  -- On the regen path the marked window rides along with the user's request.
+  -- calls there. The fast-apply path needs its edit tool, so leave tools enabled, and
+  -- the marked window rides along with the user's request.
   local instructions
-  if use_regen then
+  if use_morph then
     instructions = "<edit_window>\n" .. marked_window .. "\n</edit_window>\n\n" .. input
-  elseif use_morph then
-    instructions = input
   else
     instructions = "Do not call any tools and just response the request: " .. input
   end
@@ -417,6 +475,40 @@ function Selection:submit_input(input)
     vim.defer_fn(function() self:close_editing_input() end, 0)
   end
 
+  ---The confined region reduced to what the user actually highlighted. For a
+  ---mid-line selection the boundary lines still carry the untouched prefix/suffix,
+  ---which the guard has already verified byte for byte -- except for trailing
+  ---whitespace on the suffix, which Morph strips and the guard forgives.
+  ---@param region string[] the new lines replacing the selected lines
+  ---@return string
+  local function region_selection_text(region)
+    if #region == 0 then return "" end
+    if not partial_selection then return table.concat(region, "\n") end
+    local slice = vim.list_slice(region)
+    slice[1] = slice[1]:sub(#sel_prefix + 1)
+    local last = slice[#slice]
+    local cut = last:sub(-#sel_suffix) == sel_suffix and #sel_suffix or #(sel_suffix:gsub("%s+$", ""))
+    slice[#slice] = last:sub(1, #last - cut)
+    return table.concat(slice, "\n")
+  end
+
+  ---Last arm of the guard. An edit that hands back the selection untouched, or one
+  ---that deletes all of it, is a drafting failure rather than a result: both are
+  ---what a model produces when it could not work out what the request meant, and
+  ---applying either reads to the user as "the plugin did nothing". Rejecting sends
+  ---it back around the retry loop with an explanation instead.
+  ---@param region string[] the new lines replacing the selected lines
+  ---@return string|nil err
+  ---@return AvanteMorphRejectDetail|nil detail
+  local function check_region_changed(region)
+    local text = region_selection_text(region)
+    if text == selected_text then
+      return "the edit left the selected text exactly as it was", { where = "unchanged" }
+    end
+    if vim.trim(text) == "" then return "the edit deleted the whole selected text", { where = "emptied" } end
+    return nil
+  end
+
   -- Run Morph on a draft and confine the merge to the selection. "applied" and
   -- "failed" (Morph service error) are terminal and fully handled here; "rejected"
   -- (the merge strayed outside the selection) is handed back through on_done so the
@@ -439,14 +531,23 @@ function Selection:submit_input(input)
       -- Client-side guard: make sure Morph only touched the selected region.
       local region, verr, detail =
         Morph.scoped_region_change(morph_code_lines, merged_lines, morph_start_lnum, morph_finish_lnum)
+      if region ~= nil then
+        -- ... and, for a selection that starts or ends mid-line, only the selected
+        -- columns of the boundary lines.
+        local berr, bdetail = Morph.check_region_boundaries(region, sel_prefix, sel_suffix)
+        if berr then
+          region, verr, detail = nil, berr, bdetail
+        end
+      end
       EditTrace.add("guard", { ok = region ~= nil, verr = verr, detail = detail })
-      if region == nil and use_regen then
-        -- Fuzzy rescue, regen path only: the intended change provably lives inside
-        -- the window the model regenerated, so out-of-region drift in the merge is
-        -- discardable -- align the merge against the crop and keep just the aligned
-        -- selection region. Landmark drafts must NOT get this: their rejects mean
-        -- Morph edited the wrong duplicate, and discarding would silently no-op the
-        -- user's request (benched 0/8 correct there vs 6/6 on regen).
+      if region == nil then
+        -- Fuzzy rescue: the intended change provably lives inside the window the
+        -- model regenerated, so out-of-region drift in the merge is discardable --
+        -- align the merge against the crop and keep just the aligned selection
+        -- region. This is safe only because the model's unit of work is that
+        -- window; a landmark sketch that rejects means Morph edited the wrong
+        -- duplicate, where discarding would silently no-op the user's request
+        -- (benched 0/8 correct there vs 6/6 here).
         while #merged_lines > 0 and merged_lines[#merged_lines]:match("^%s*$") do
           table.remove(merged_lines)
         end
@@ -457,10 +558,22 @@ function Selection:submit_input(input)
           #morph_code_lines - morph_finish_lnum
         )
         -- A rescue identical to the original selection would silently drop the
-        -- user's request; fall through to the reject-and-retry loop instead.
-        if table.concat(rescued, "\n") ~= table.concat(original_selection_lines, "\n") then
+        -- user's request, and one that ate the unselected part of a boundary line
+        -- is exactly what the guard exists to stop; fall through to the
+        -- reject-and-retry loop in both cases.
+        if
+          table.concat(rescued, "\n") ~= table.concat(original_selection_lines, "\n")
+          and Morph.check_region_boundaries(rescued, sel_prefix, sel_suffix) == nil
+        then
           region = rescued
           EditTrace.add("rescue", { region = table.concat(rescued, "\n") })
+        end
+      end
+      if region ~= nil then
+        local cerr, cdetail = check_region_changed(region)
+        if cerr then
+          region, verr, detail = nil, cerr, cdetail
+          EditTrace.add("guard", { ok = false, verr = verr, detail = detail })
         end
       end
       if region == nil then
@@ -478,69 +591,84 @@ function Selection:submit_input(input)
 
   -- Tool result for a rejected merge. The drafting model never sees line numbers
   -- (we deliberately keep them out of its context so it doesn't waste tokens
-  -- counting), so anchor everything by content: quote the line that changed and
-  -- the first/last lines of the selection.
+  -- counting), so anchor everything by content: quote the text that changed and
+  -- the bounds of the selection.
+  ---@param verr string
+  ---@param detail? AvanteMorphRejectDetail
+  ---@return string
+  local function stray_sentence(verr, detail)
+    if detail and (detail.where == "before" or detail.where == "after") then
+      return ("%s the selection, the line `%s` became `%s`."):format(
+        detail.where == "before" and "Above" or "Below",
+        detail.orig,
+        detail.merged
+      )
+    end
+    if detail and (detail.where == "prefix" or detail.where == "suffix") then
+      return ("The selection covers only part of its line: the text %s it, `%s`, is NOT selected and must survive byte for byte, but the result reads `%s`."):format(
+        detail.where == "prefix" and "before" or "after",
+        detail.orig,
+        detail.merged
+      )
+    end
+    return "Context around the selection was deleted or reordered (" .. verr .. ")."
+  end
+
+  ---One sentence restating what the selection is, by content.
+  ---@return string
+  local function selection_sentence()
+    if partial_selection then
+      return ("The selection is `%s`, and it is only part of the line `%s`; nothing else on that line, and no other line, may change."):format(
+        selected_text,
+        original_selection_lines[1]
+      )
+    end
+    if #original_selection_lines == 1 then
+      return ("The selection is the single line `%s`; that is the only line you may change."):format(
+        original_selection_lines[1] or ""
+      )
+    end
+    return ("The selection starts at the line `%s` and ends at the line `%s`; only the lines between and including those may change."):format(
+      original_selection_lines[1] or "",
+      original_selection_lines[#original_selection_lines] or ""
+    )
+  end
+
+  ---The model's unit of work is the whole edit window, so every rejection points it
+  ---back at the window bounds rather than at landmark mechanics.
   ---@param verr string
   ---@param detail? AvanteMorphRejectDetail
   local function reject_feedback(verr, detail)
-    local parts = {
-      "REJECTED: the applied edit changed the file outside the region the user selected, so ALL of it was discarded and the file is unchanged.",
-    }
-    if detail and (detail.where == "before" or detail.where == "after") then
-      parts[#parts + 1] = ("%s the selection, the line `%s` became `%s`."):format(
-        detail.where == "before" and "Above" or "Below",
-        detail.orig,
-        detail.merged
-      )
-    else
-      parts[#parts + 1] = "Context around the selection was deleted or reordered (" .. verr .. ")."
-    end
-    local first_sel = original_selection_lines[1] or ""
-    local last_sel = original_selection_lines[#original_selection_lines] or ""
-    if #original_selection_lines == 1 then
-      parts[#parts + 1] = ("The selection is the single line `%s`; that is the only line you may change."):format(
-        first_sel
-      )
-    else
-      parts[#parts + 1] = ("The selection starts at the line `%s` and ends at the line `%s`; only the lines between and including those may change."):format(
-        first_sel,
-        last_sel
-      )
-    end
-    parts[#parts + 1] =
-      "Everything else -- including comments and blank lines right next to the selection -- must be left exactly as it is: cover it with `... existing code ...` markers or reproduce it byte-for-byte as anchors. Call edit_file again with a corrected code_edit."
-    return table.concat(parts, "\n")
-  end
-
-  -- Regen-flavored variant: the model's unit of work is the whole edit window, so
-  -- point it back at the window bounds instead of at landmark mechanics.
-  ---@param verr string
-  ---@param detail? AvanteMorphRejectDetail
-  local function regen_reject_feedback(verr, detail)
-    local parts = {
-      "REJECTED: the applied edit changed the file outside the region the user selected, so ALL of it was discarded and the file is unchanged.",
-    }
-    if detail and (detail.where == "before" or detail.where == "after") then
-      parts[#parts + 1] = ("%s the selection, the line `%s` became `%s`."):format(
-        detail.where == "before" and "Above" or "Below",
-        detail.orig,
-        detail.merged
-      )
-    else
-      parts[#parts + 1] = "Context around the selection was deleted or reordered (" .. verr .. ")."
-    end
-    parts[#parts + 1] = ("Call rewrite_window again with the ENTIRE edit window -- it starts at the line `%s` and ends at the line `%s` -- copying every line outside the <selection> markers exactly as shown, byte for byte, and applying the change only inside the selection."):format(
+    local retry_sentence = ("Call rewrite_window again with the ENTIRE edit window -- it starts at the line `%s` and ends at the line `%s` -- copying everything outside the <selection> markers exactly as shown, byte for byte, and applying the change only inside the selection."):format(
       code_lines[window_start] or "",
       code_lines[window_finish] or ""
     )
+    local where = detail and detail.where
+    -- A no-op or a wholesale deletion is a different failure from straying outside
+    -- the selection: the model needs to be told to commit to a change, not to copy
+    -- more carefully.
+    if where == "unchanged" or where == "emptied" then
+      return table.concat({
+        where == "unchanged" and "REJECTED: the selected text came back exactly as it was, so nothing was applied."
+          or "REJECTED: the selected text came back empty, so nothing was applied. Removing the selection wholesale is never the edit.",
+        selection_sentence(),
+        "The user asked for a change to that text and expects one. Their request may be very short; work out what it most plausibly means for this code and write that, rather than returning the text untouched.",
+        retry_sentence,
+      }, "\n")
+    end
+    local parts = {
+      "REJECTED: the applied edit changed the file outside the region the user selected, so ALL of it was discarded and the file is unchanged.",
+      stray_sentence(verr, detail),
+    }
+    if partial_selection then parts[#parts + 1] = selection_sentence() end
+    parts[#parts + 1] = retry_sentence
     return table.concat(parts, "\n")
   end
 
-  -- Shared tail for both drafting tools: relay a rejected merge back to the model
-  -- while attempts remain, otherwise end the turn.
+  -- Tail for the drafting tool: relay a rejected merge back to the model while
+  -- attempts remain, otherwise end the turn.
   ---@param tool_opts table
-  ---@param feedback_fn fun(verr: string, detail?: AvanteMorphRejectDetail): string
-  local function make_confine_done(tool_opts, feedback_fn)
+  local function make_confine_done(tool_opts)
     return function(status, verr, detail)
       if status == "rejected" then
         if draft.attempts < MAX_DRAFT_ATTEMPTS then
@@ -556,7 +684,7 @@ function Selection:submit_input(input)
           )
           -- An error tool result keeps the agent loop going: it re-prompts the
           -- drafting model with this feedback and the tool call history.
-          local feedback = feedback_fn(verr, detail)
+          local feedback = reject_feedback(verr, detail)
           EditTrace.add("feedback", { text = feedback })
           tool_opts.on_complete(nil, feedback)
           return
@@ -581,86 +709,14 @@ function Selection:submit_input(input)
     end
   end
 
-  local edit_file_tool = {
-    name = "edit_file",
-    description = "Propose an edit to the selected region. A faster, less capable model applies it, so write "
-      .. "the change as a sketch: only the lines you are changing, with a `// ... existing code ...` comment "
-      .. "(in the file's language) standing in for every unchanged span. Only the user's selected region may "
-      .. "change: if the applied result touches anything outside it, the whole edit is rejected and the "
-      .. "validation error is returned to you so you can call this tool again with a corrected draft.",
-    param = {
-      type = "table",
-      fields = {
-        { name = "path", type = "string", description = "The target file path to modify." },
-        {
-          name = "instructions",
-          type = "string",
-          description = 'A single first-person sentence describing the edit, e.g. "I am filling in the z-row '
-            .. 'of the tableau". Used to disambiguate where the edit applies.',
-        },
-        {
-          name = "code_edit",
-          type = "string",
-          description = "Only the changed lines, with `// ... existing code ...` markers for every unchanged "
-            .. "span. Keep enough surrounding context to anchor the edit; never omit code without a marker.",
-        },
-      },
-    },
-    returns = {
-      { name = "success", type = "boolean", description = "Whether the edit was applied" },
-    },
-    func = function(tool_input, tool_opts)
-      -- The agent loop pre-invokes edit tools while their arguments are still
-      -- streaming (live-preview UIs use that); those calls carry partial input
-      -- and a no-op on_complete. Only the completed call counts here.
-      if tool_opts.streaming then return nil, nil end
-      -- A second call after a successful apply (the model ignoring "call once")
-      -- has nothing left to edit; just end the turn.
-      if draft.applied then return nil, Helpers.CANCEL_TOKEN end
-      draft.attempts = draft.attempts + 1
-      local code_edit = tool_input.code_edit
-      EditTrace.add("draft", {
-        attempt = draft.attempts,
-        path = tool_input.path,
-        instructions = tool_input.instructions,
-        code_edit = code_edit,
-      })
-      if code_edit == nil or code_edit == "" then
-        if draft.attempts >= MAX_DRAFT_ATTEMPTS then
-          flusher.done = true
-          if self.prompt_input then self.prompt_input:stop_spinner() end
-          EditTrace.add(
-            "final",
-            { status = "gave up", note = "no usable draft after " .. draft.attempts .. " attempts" }
-          )
-          Utils.error(
-            ("Selection edit: no usable draft after %d attempts. The buffer was left unchanged."):format(
-              draft.attempts
-            ),
-            { title = "Avante" }
-          )
-          return nil, Helpers.CANCEL_TOKEN
-        end
-        return nil,
-          "edit_file was called without a code_edit; nothing was applied. Call it again with the draft in code_edit."
-      end
-      local morph_instruction = tool_input.instructions
-      if morph_instruction == nil or morph_instruction == "" then
-        morph_instruction = "Apply the update to the selected region only, leaving the rest of the file unchanged."
-      end
-      morph_apply_and_confine(code_edit, morph_instruction, make_confine_done(tool_opts, reject_feedback))
-      -- Async tool: the agent loop waits for tool_opts.on_complete.
-      return nil, nil
-    end,
-  }
-
   local rewrite_window_tool = {
     name = "rewrite_window",
     description = "Submit the rewritten edit window: the entire window shown in <edit_window>, with the user's "
-      .. "change applied and every line outside the <selection> markers copied exactly, byte for byte. Do not "
-      .. "include the <selection> and </selection> marker lines. Only the user's selection may change: if the "
-      .. "applied result touches anything outside it, the whole edit is rejected and the validation error is "
-      .. "returned to you so you can call this tool again with a corrected window.",
+      .. "change applied and everything outside the <selection> markers copied exactly, byte for byte. Never "
+      .. "write a <selection> or </selection> marker in the code you submit. Only the user's selection may "
+      .. "change, and it must change: an edit that touches anything outside it, that leaves the selected text "
+      .. "as it was, or that deletes the selected text outright is rejected in full, and the validation error "
+      .. "is returned to you so you can call this tool again with a corrected window.",
     param = {
       type = "table",
       fields = {
@@ -675,7 +731,12 @@ function Selection:submit_input(input)
       { name = "success", type = "boolean", description = "Whether the edit was applied" },
     },
     func = function(tool_input, tool_opts)
+      -- The agent loop pre-invokes edit tools while their arguments are still
+      -- streaming (live-preview UIs use that); those calls carry partial input
+      -- and a no-op on_complete. Only the completed call counts here.
       if tool_opts.streaming then return nil, nil end
+      -- A second call after a successful apply (the model ignoring "call once")
+      -- has nothing left to edit; just end the turn.
       if draft.applied then return nil, Helpers.CANCEL_TOKEN end
       draft.attempts = draft.attempts + 1
       local code = tool_input.code
@@ -699,7 +760,7 @@ function Selection:submit_input(input)
         return nil,
           "rewrite_window was called without code; nothing was applied. Call it again with the whole edit window in code."
       end
-      morph_apply_and_confine(window_to_update(code), input, make_confine_done(tool_opts, regen_reject_feedback))
+      morph_apply_and_confine(window_to_update(code), input, make_confine_done(tool_opts))
       -- Async tool: the agent loop waits for tool_opts.on_complete.
       return nil, nil
     end,
@@ -757,12 +818,10 @@ function Selection:submit_input(input)
       return
     end
     EditTrace.add("draft_text", { text = code_edit })
-    if use_regen then
-      -- Salvage a fenced block if the model answered in prose, then treat the text
-      -- as the regenerated window.
-      local fenced = code_edit:match("```[%w_]*\n(.-)```")
-      code_edit = window_to_update(fenced or code_edit)
-    end
+    -- Salvage a fenced block if the model answered in prose, then treat the text
+    -- as the regenerated window.
+    local fenced = code_edit:match("```[%w_]*\n(.-)```")
+    code_edit = window_to_update(fenced or code_edit)
     morph_apply_and_confine(
       code_edit,
       "Apply the update to the selected region only, leaving the rest of the file unchanged.",
@@ -787,8 +846,8 @@ function Selection:submit_input(input)
     code_lang = filetype,
     selected_code = selected_code,
     instructions = instructions,
-    mode = use_regen and "editing_regen" or (use_morph and "editing_morph" or "editing"),
-    tools = use_morph and { use_regen and rewrite_window_tool or edit_file_tool } or nil,
+    mode = use_morph and "editing_regen" or "editing",
+    tools = use_morph and { rewrite_window_tool } or nil,
     get_history_messages = use_morph and get_history_messages or nil,
     on_messages_add = use_morph and on_messages_add or nil,
     on_start = on_start,
@@ -819,10 +878,9 @@ function Selection:create_editing_input(request, line1, line2)
     local filetype = Utils.get_filetype(filepath)
     local content_lines = vim.list_slice(code_lines, line1, line2)
     local content = table.concat(content_lines, "\n")
-    local range = Range:new(
-      { lnum = line1, col = #content_lines[1] },
-      { lnum = line2, col = #content_lines[#content_lines] }
-    )
+    -- A :range command selects whole lines, so the columns must span them: a start
+    -- column past 1 would read downstream as "the user selected part of this line".
+    local range = Range:new({ lnum = line1, col = 1 }, { lnum = line2, col = #content_lines[#content_lines] })
     self.selection = SelectionResult:new(filepath, filetype, content, range)
   else
     self.selection = Utils.get_visual_selection_and_range()
@@ -833,21 +891,12 @@ function Selection:create_editing_input(request, line1, line2)
     return
   end
 
-  local start_row
-  local start_col
-  local end_row
-  local end_col
-  if vim.fn.mode() == "V" then
-    start_row = self.selection.range.start.lnum - 1
-    start_col = 0
-    end_row = self.selection.range.finish.lnum - 1
-    end_col = #code_lines[self.selection.range.finish.lnum]
-  else
-    start_row = self.selection.range.start.lnum - 1
-    start_col = self.selection.range.start.col - 1
-    end_row = self.selection.range.finish.lnum - 1
-    end_col = math.min(self.selection.range.finish.col, #code_lines[self.selection.range.finish.lnum])
-  end
+  -- Columns arrive normalized (whole lines for linewise/blockwise, inclusive byte
+  -- columns for charwise), so one branch covers every visual mode.
+  local start_row = self.selection.range.start.lnum - 1
+  local start_col = self.selection.range.start.col - 1
+  local end_row = self.selection.range.finish.lnum - 1
+  local end_col = math.min(self.selection.range.finish.col, #code_lines[self.selection.range.finish.lnum])
 
   self.selected_code_extmark_id =
     api.nvim_buf_set_extmark(self.code_bufnr, SELECTED_CODE_NAMESPACE, start_row, start_col, {

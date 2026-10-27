@@ -20,16 +20,26 @@ describe("morph.crop_around_selection", function()
     assert.are.same("line 15", cropped[start_lnum])
   end)
 
-  it("grows each side in proportion to a larger selection", function()
+  it("keeps the same six lines regardless of how large the selection is", function()
     local cropped, start_lnum, finish_lnum, source_start, source_finish =
       Morph.crop_around_selection(numbered_lines(60), 20, 29)
-    assert.are.same(10, source_start)
-    assert.are.same(39, source_finish)
-    assert.are.same(11, start_lnum)
-    assert.are.same(20, finish_lnum)
-    assert.are.same(30, #cropped)
+    assert.are.same(14, source_start)
+    assert.are.same(35, source_finish)
+    assert.are.same(7, start_lnum)
+    assert.are.same(16, finish_lnum)
+    assert.are.same(22, #cropped)
     assert.are.same("line 20", cropped[start_lnum])
     assert.are.same("line 29", cropped[finish_lnum])
+  end)
+
+  -- The crop only has to cover the edit window (selection +/- 3) plus room for the
+  -- landmarks wrapping it; anything wider is extra anchors for Morph to mis-place on.
+  it("stays wider than the edit window on both sides", function()
+    local lines = numbered_lines(60)
+    local _, _, _, crop_start, crop_finish = Morph.crop_around_selection(lines, 20, 29)
+    local window_start, window_finish = Morph.window_around_selection(lines, 20, 29)
+    assert.is_true(crop_start < window_start)
+    assert.is_true(crop_finish > window_finish)
   end)
 
   it("clamps context at the start of the file", function()
@@ -72,6 +82,37 @@ describe("morph.window_around_selection", function()
     local ws, wf = Morph.window_around_selection(numbered_lines(10), 1, 9)
     assert.are.same(1, ws)
     assert.are.same(10, wf)
+  end)
+end)
+
+describe("morph.draft_context_around_selection", function()
+  local function numbered_lines(count)
+    local lines = {}
+    for i = 1, count do
+      lines[i] = "line " .. i
+    end
+    return lines
+  end
+
+  it("keeps a hundred context lines on each side", function()
+    local cs, cf = Morph.draft_context_around_selection(numbered_lines(500), 200, 202)
+    assert.are.same(100, cs)
+    assert.are.same(302, cf)
+  end)
+
+  it("clamps at the buffer edges", function()
+    local cs, cf = Morph.draft_context_around_selection(numbered_lines(20), 5, 6)
+    assert.are.same(1, cs)
+    assert.are.same(20, cf)
+  end)
+
+  -- The point of the split: the drafting model sees far more than the apply model.
+  it("is much wider than the apply crop", function()
+    local lines = numbered_lines(500)
+    local _, _, _, crop_start, crop_finish = Morph.crop_around_selection(lines, 200, 202)
+    local cs, cf = Morph.draft_context_around_selection(lines, 200, 202)
+    assert.is_true(cs < crop_start)
+    assert.is_true(cf > crop_finish)
   end)
 end)
 
@@ -252,4 +293,88 @@ describe("morph.scoped_region_change", function()
     assert.is_nil(err)
     assert.are.same({ "z, 0, -3, 0, 12;" }, region)
   end)
+end)
+
+describe("morph.check_region_boundaries", function()
+  -- The failure this guards: one value inside a single-line list was selected and
+  -- the whole line came back rewritten. The line-level guard cannot see that.
+  -- `  local opts = { width = 40, height = 20, border = "single" }` with `40`
+  -- selected splits into:
+  local prefix = "  local opts = { width = "
+  local suffix = ', height = 20, border = "single" }'
+
+  it(
+    "passes a whole-line selection through untouched",
+    function() assert.is_nil(Morph.check_region_boundaries({ "anything at all" }, "", "")) end
+  )
+
+  it(
+    "accepts a rewrite confined to the selected columns",
+    function() assert.is_nil(Morph.check_region_boundaries({ prefix .. "80" .. suffix }, prefix, suffix)) end
+  )
+
+  it("rejects a rewrite that changed the fields after the selection", function()
+    local merged = '  local opts = { width = 80, height = 40, border = "single" }'
+    local err, detail = Morph.check_region_boundaries({ merged }, prefix, suffix)
+    assert.is_truthy(err)
+    assert.are.same("suffix", detail.where)
+  end)
+
+  it("rejects a rewrite that changed the text before the selection", function()
+    local merged = '  local opts = { win_width = 80, height = 20, border = "single" }'
+    local err, detail = Morph.check_region_boundaries({ merged }, prefix, suffix)
+    assert.is_truthy(err)
+    assert.are.same("prefix", detail.where)
+  end)
+
+  it(
+    "rejects a merge that dropped the selected line entirely",
+    function() assert.is_truthy(Morph.check_region_boundaries({}, prefix, suffix)) end
+  )
+
+  it(
+    "rejects a line too short to still hold the unselected text",
+    function() assert.is_truthy(Morph.check_region_boundaries({ "80" }, prefix, suffix)) end
+  )
+
+  it("checks the first and last lines when a partial selection grew to several", function()
+    local region = { prefix .. "compute_width(", "    base,", "  )" .. suffix }
+    assert.is_nil(Morph.check_region_boundaries(region, prefix, suffix))
+    region[3] = "  ), height = 20 }"
+    assert.is_truthy(Morph.check_region_boundaries(region, prefix, suffix))
+  end)
+
+  it("ignores an unused side", function()
+    assert.is_nil(Morph.check_region_boundaries({ "new tail" }, "", ""))
+    assert.is_nil(Morph.check_region_boundaries({ prefix .. "new tail" }, prefix, ""))
+    assert.is_truthy(Morph.check_region_boundaries({ "new tail" }, prefix, ""))
+  end)
+
+  -- "make this multi-line" on a partial selection: the selected span becomes
+  -- several lines, and the guard must not read that growth as straying outside.
+  it("accepts a partial selection exploded into a multi-line argument list", function()
+    local sig_prefix = "local function resize("
+    local sig_suffix = ")"
+    local region = { sig_prefix, "  width,", "  height,", "  border" .. sig_suffix }
+    assert.is_nil(Morph.check_region_boundaries(region, sig_prefix, sig_suffix))
+  end)
+
+  it("accepts a multi-line explosion that closes on its own line", function()
+    local json_prefix = '  "sizes": '
+    local json_suffix = ","
+    local region = { json_prefix .. "[", "    1,", "    2,", "    3", "  ]" .. json_suffix }
+    assert.is_nil(Morph.check_region_boundaries(region, json_prefix, json_suffix))
+  end)
+
+  it("still rejects a multi-line explosion that ate the text after the selection", function()
+    local json_prefix = '  "sizes": '
+    local json_suffix = ', "unit": "px"'
+    local region = { json_prefix .. "[", "    1,", "    2", "  ]" }
+    assert.is_truthy(Morph.check_region_boundaries(region, json_prefix, json_suffix))
+  end)
+
+  it(
+    "tolerates trailing whitespace stripped from the suffix",
+    function() assert.is_nil(Morph.check_region_boundaries({ "x = 1;" }, "", ";   ")) end
+  )
 end)
