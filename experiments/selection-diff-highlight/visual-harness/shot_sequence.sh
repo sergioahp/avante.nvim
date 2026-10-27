@@ -9,6 +9,10 @@ SEQ_DIR="$HARNESS_DIR/sequences/${FIXTURE}_${STAMP}"
 
 mkdir -p "$SEQ_DIR" "$HARNESS_DIR/.state"
 
+FRAME_CONTENTS=()
+FRAME_OUTPUTS=()
+FRAME_TITLES=()
+
 render_phase() {
   local phase="$1"
   local index="$2"
@@ -17,6 +21,7 @@ render_phase() {
   local dump="$HARNESS_DIR/.state/${FIXTURE}_${phase}_${STAMP}.ansi"
   local ready="$HARNESS_DIR/.state/${FIXTURE}_${phase}_${STAMP}.ready"
   local raw="$SEQ_DIR/${index}_${phase}.raw.png"
+  local content="$SEQ_DIR/.${index}_${phase}.content.png"
   local out="$SEQ_DIR/${index}_${phase}.png"
   local sock="avante-sdh-${phase}-${STAMP}-$$"
 
@@ -54,17 +59,43 @@ EOF
     nix shell nixpkgs#charm-freeze --command freeze "$dump" --output "$raw" --font.size 16
   fi
 
-  magick "$raw" -trim +repage \
-    -background "#101216" -gravity north -splice 0x42 \
-    -font DejaVu-Sans -fill "#d7dae0" -pointsize 26 -annotate +24+10 "$index  $title" \
-    "$out"
+  magick "$raw" -trim +repage "$content"
   rm -f "$raw"
+
+  FRAME_CONTENTS+=("$content")
+  FRAME_OUTPUTS+=("$out")
+  FRAME_TITLES+=("$index  $title")
+}
+
+finalize_sequence() {
+  local max_width=0
+  local max_height=0
+  local width
+  local height
+  local i
+
+  for content in "${FRAME_CONTENTS[@]}"; do
+    read -r width height < <(identify -format '%w %h\n' "$content")
+    if ((width > max_width)); then max_width=$width; fi
+    if ((height > max_height)); then max_height=$height; fi
+  done
+
+  for i in "${!FRAME_CONTENTS[@]}"; do
+    magick "${FRAME_CONTENTS[$i]}" \
+      -background "#101216" -gravity northwest -extent "${max_width}x${max_height}" \
+      -bordercolor "#101216" -border 48x32 \
+      -gravity north -splice 0x48 \
+      -gravity northwest -font DejaVu-Sans -fill "#d7dae0" -pointsize 26 -annotate +48+10 "${FRAME_TITLES[$i]}" \
+      "${FRAME_OUTPUTS[$i]}"
+    rm -f "${FRAME_CONTENTS[$i]}"
+  done
 }
 
 render_phase "before" "01" "before edit"
 render_phase "selected" "02" "selection submitted"
-render_phase "delete_flash" "03" "deleted tokens flash before edit"
-render_phase "after_highlight" "04" "successful edit, changed tokens highlighted"
+render_phase "combined" "03" "after state + virtual before diff"
+render_phase "added" "04" "virtual text cleared; additions remain"
 render_phase "after_cleared" "05" "highlight timeout elapsed"
+finalize_sequence
 
 echo "$SEQ_DIR"

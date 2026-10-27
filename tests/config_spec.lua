@@ -28,6 +28,15 @@ describe("config", function()
     assert.is_true(Config.behaviour.auto_suggestions)
   end)
 
+  it("allows opting out of instant selection diff highlighting", function()
+    vim.g.avante = nil
+    Config.setup({ selection = { diff_highlight_instant = false } })
+
+    assert.is_false(Config.selection.diff_highlight_instant)
+    assert.equals(100, Config.selection.diff_highlight_timeout_ms)
+    assert.equals(500, Config.selection.diff_highlight_added_timeout_ms)
+  end)
+
   it("lets explicit setup options override vim.g.avante", function()
     vim.g.avante = {
       provider = "openai",
